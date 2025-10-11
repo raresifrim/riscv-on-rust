@@ -1,17 +1,17 @@
 use super::pipeline_stage::*;
 use crate::risc_soc::cache::{Cache};
-use crate::risc_soc::memory_management_unit::{Address, MemoryManagementUnit, MemoryRequest, MemoryResponse};
+use crate::risc_soc::memory_management_unit::{MemoryManagementUnit, MemoryRequest, MemoryResponse};
+use std::fmt::Debug;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicU64;
 use std::fs;
 use object::{elf, Endianness};
 use object::read::elf::{FileHeader, SectionHeader};
-use crate::risc_soc::memory_management_unit::MemoryDevice;
 
-
-/// type used to represent data inside the RV32 which is always a 4 byte word
-pub type RV32Word = u32;
+/// type used to represent data inside the RiscCore (defaulted to u32 for RV32)
+/// can be overwritten to u64 if RV64 is intended for implementation
+pub type RiscWord = u32;
 
 /// sizes of the supported words in bytes
 #[derive(Debug, Clone, Copy)]
@@ -22,13 +22,13 @@ pub enum WordSize {
     DOUBLE = 8,
 }
 
-#[derive(Debug)]
+
 pub struct RiscCore {
     pub stages: Vec<PipelineStage>,
-    icache: Option<Cache>,
-    dcache: Option<Cache>,
+    icache: Option<Box<dyn Cache + Send + Sync>>,
+    dcache: Option<Box<dyn Cache + Send + Sync>>,
     pub registers: Registers,
-    pub program_counter: AtomicU32,
+    pub program_counter: AtomicU64,
     mmu: MemoryManagementUnit
 }
 
@@ -43,15 +43,15 @@ impl RiscCore {
             icache: None,
             dcache: None,
             registers: Registers::default(),
-            program_counter: AtomicU32::new(0x8000_0000),
+            program_counter: AtomicU64::new(0x8000_0000),
             mmu: MemoryManagementUnit::default()
         }
     }
 
     pub fn add_l1_icache(
         &mut self,
-        icache: Cache,
-        dcache: Cache
+        icache: Box<dyn Cache + Send + Sync>,
+        dcache: Box<dyn Cache + Send + Sync>
     ) -> &mut Self {
         self.icache = Some(icache);
         self.dcache = Some(dcache);
@@ -123,12 +123,12 @@ impl RiscCore {
         
     }
 
-    pub fn get_pc(&self) -> u32 {
-        self.program_counter.load(std::sync::atomic::Ordering::SeqCst)
+    pub fn get_pc(&self) -> RiscWord {
+        self.program_counter.load(std::sync::atomic::Ordering::SeqCst) as RiscWord
     }
 
-    pub fn set_pc(&self, pc:u32) {
-        self.program_counter.store(pc, std::sync::atomic::Ordering::SeqCst);
+    pub fn set_pc(&self, pc:RiscWord) {
+        self.program_counter.store(pc as u64, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// start execution of loaded program
@@ -160,16 +160,16 @@ impl DerefMut for RiscCore {
 }
 
 #[derive(Debug, Default)]
-pub struct Registers([u32; 32]);
+pub struct Registers([RiscWord; 32]);
 
 impl Registers {
-    pub fn read_regs(&self, rs1_address: usize, rs2_address: usize) -> (u32, u32) {
+    pub fn read_regs(&self, rs1_address: usize, rs2_address: usize) -> (RiscWord, RiscWord) {
         assert!(rs1_address < 32);
         assert!(rs2_address < 32);
         (self.0[rs1_address], self.0[rs2_address])
     }
 
-    pub fn write_reg(&mut self, rd_address: usize, rd: u32) {
+    pub fn write_reg(&mut self, rd_address: usize, rd: RiscWord) {
         assert!(rd_address < 32);
         if rd_address > 0 {
             //should never overwrite x0

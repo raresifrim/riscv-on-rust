@@ -1,9 +1,9 @@
-use super::{pipeline_stage::PipelineData};
 use crate::risc_soc::risc_soc::RiscCore;
 use std::sync::{Arc, RwLock};
 use std::thread::{sleep};
 use crate::risc_soc::memory_management_unit::{Address, MemoryRequest, MemoryRequestType};
 use crate::risc_soc::risc_soc::WordSize;
+use crate::risc_soc::pipeline_stage::PipelineData;
 
 pub fn rv32_mcu_fetch_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RiscCore>>) -> PipelineData {
     

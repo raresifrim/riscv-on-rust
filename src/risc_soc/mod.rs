@@ -1,7 +1,5 @@
-mod pipeline_stage;
-mod fetch;
-mod decode;
-mod cache;
+pub mod pipeline_stage;
+pub mod cache;
 mod instruction_asm;
-mod memory_management_unit;
+pub mod memory_management_unit;
 pub mod risc_soc;

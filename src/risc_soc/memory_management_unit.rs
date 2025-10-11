@@ -1,19 +1,22 @@
 use ahash::AHashMap;
 use crate::risc_soc::risc_soc::WordSize;
-use std::{default, fmt::Debug, os::unix::process};
+use std::{fmt::Debug};
 
 pub type Address = u64;
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum MemoryRequestType {
     READ,
     WRITE
 }
 
+#[derive(Debug, PartialEq)]
 pub enum MemoryResponseType {
     CacheHit,
     CacheMiss,
+    Valid,
     InvalidAddress,
+    UnalignedAddress,
     NotWrittable,
     NotReadable,
     NotExecutable,
@@ -48,7 +51,7 @@ pub struct MemoryRequest {
 /// TODO: add methods for converting byte array back to u8/u16/u32 etc for processor
 pub struct MemoryResponse {
     pub data: Vec<u8>,
-    pub valid: MemoryResponseType
+    pub status: MemoryResponseType
 }
 
 pub trait MemoryDevice {
@@ -71,6 +74,11 @@ pub trait MemoryDevice {
 
     /// we should know what kind of memory device we are dealing with
     fn get_memory_type(&self) -> MemoryDeviceType;
+
+    /// init portion of memory with specific data such as DRAM with a binary
+    /// address specified here is the physical address of this memory array
+    fn init_mem(&mut self, address: Address, data: &[u8]);
+
 }
 
 

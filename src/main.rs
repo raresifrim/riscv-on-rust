@@ -1,4 +1,5 @@
 mod risc_soc;
+mod rv32_baremetal;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::risc_soc::risc_soc::RiscCore;

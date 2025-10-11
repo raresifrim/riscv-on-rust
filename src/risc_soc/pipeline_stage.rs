@@ -53,7 +53,7 @@ pub struct PipelinePayload {
     data: PipelineData,
 }
 
-#[derive(Debug)]
+
 pub struct PipelineStage {
     /// name identifier for the pipeline stage
     name: String,

@@ -1,4 +1,4 @@
-use super::pipeline_stage::PipelineData;
+use crate::risc_soc::pipeline_stage::PipelineData;
 use crate::risc_soc::risc_soc::RiscCore;
 use std::sync::{Arc, RwLock};
 use std::u32;
