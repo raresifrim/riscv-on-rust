@@ -1,9 +1,8 @@
-use raki::Decode;
-
-use crate::pipeline_stage::PipelineData;
-use crate::rv32::rv32::RV32Core;
+use super::pipeline_stage::PipelineData;
+use crate::risc_soc::risc_soc::RiscCore;
 use std::sync::{Arc, RwLock};
 use std::u32;
+use crate::risc_soc::pipeline_stage::PipelineStageInterface;
 
 /// FUNC7 and FUNCT3 field lengths
 const FUNCT_7L: u8 = 7;
@@ -32,7 +31,7 @@ pub const OP_ALUI   :u8 = 0b0010011; // ALU Immediate Instructions (ADDI, ANDI, 
 pub const OP_FENCE  :u8 = 0b0001111; // Fence
 pub const OP_SYSTEM :u8 = 0b1110011; // System Instructions (ECALL, EBREAK, etc.)
 
-pub fn rv32_decode_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RV32Core>>) -> PipelineData {
+pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RiscCore>>) -> PipelineData {
     
     // we are expecting to get an instruction and the the program counter, both being 32-bits
     assert!(pipeline_reg.0.len() == 8);
@@ -71,15 +70,30 @@ pub fn rv32_decode_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RV3
             instr31 | instr19_12 | instr20 | instr30_21
         }
         OP_AUIPC | OP_LUI => instruction & 0xFFF,
-        _ => 0u32,
+        OP_ALU => 0u32,
+        _ => panic!("Cannot decode this type of opcode: {opcode}") //this MCU cannot execute SYSTEM/FENCE instr
     };
-    //check that we decoded imm correctly
-    let decoded_instr = instruction.decode(raki::Isa::Rv32).unwrap();
-    assert!(decoded_instr.imm.unwrap() as u32 == imm);
 
     // leave read of regs at the end
     let core = rv32_core.read().unwrap();
-    let (rs1, rs2) = core.read_regs(rs1_address as usize, rs2_address as usize);
+    //first check commit stage(4th in our case) and see if there is a rd there equal to any of our rs and forward it directly here
+    let commit_data = core.stages[3].extract_data();
+    let wb_rd_address = commit_data.get_u8(0x0) & REG_MASK as u8;
+    let rs1;
+    let rs2;
+    if wb_rd_address == rs1_address && 
+    wb_rd_address == rs2_address {
+        rs1 = commit_data.get_u32(0x1);
+        rs2 = commit_data.get_u32(0x1);
+    } else if wb_rd_address == rs1_address {
+        rs1 = commit_data.get_u32(0x1);
+        (_, rs2) = core.read_regs(rs1_address as usize, rs2_address as usize);
+    } else if wb_rd_address == rs2_address {
+        rs2 = commit_data.get_u32(0x1);
+        (rs1, _) = core.read_regs(rs1_address as usize, rs2_address as usize);
+    } else {
+        (rs1, rs2) = core.read_regs(rs1_address as usize, rs2_address as usize);
+    }
 
     //concatanate add data into the pipeline register for next stage
     let mut pipeline_out = vec![];

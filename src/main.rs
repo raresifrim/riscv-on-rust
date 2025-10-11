@@ -1,6 +1,7 @@
-mod rv32;
-use rv32::*;
+mod risc_soc;
 use tracing_subscriber::{EnvFilter, fmt};
+
+use crate::risc_soc::risc_soc::RiscCore;
 
 fn main() {
     fmt::fmt()
@@ -10,4 +11,7 @@ fn main() {
         .init();
 
     tracing::info!("Initializing RISCV32 runtime environment");
+
+    let rv32i_core = RiscCore::new(4);
+    rv32i_core.load_binary("./qemu_playground/test_microblaze.elf".to_string());
 }

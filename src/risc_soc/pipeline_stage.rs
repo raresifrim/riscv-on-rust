@@ -1,6 +1,6 @@
-use crate::rv32::rv32::RV32Core;
+use super::instruction_asm::rv32_asm;
+use crate::risc_soc::risc_soc::RiscCore;
 use crossbeam_channel::{Receiver, Sender};
-use raki::Decode;
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
@@ -68,18 +68,18 @@ pub struct PipelineStage {
     input_channel: Option<Receiver<PipelinePayload>>,
     output_channel: Option<Sender<PipelinePayload>>,
     /// function that runs inside the pipeline stage
-    process_fn: fn(&PipelineData, &Arc<RV32Core>) -> PipelineData,
+    process_fn: fn(&PipelineData, &Arc<RiscCore>) -> PipelineData,
     /// reference to entire core, as pipeline stages can directly access data between them (ex. hazard detection or forwarding)
-    core: Arc<RV32Core>,
+    core: Arc<RiscCore>,
 }
 
 pub trait PipelineStageInterface {
-    type F: Fn(&PipelineData, &Arc<RV32Core>) -> PipelineData + Send + 'static;
+    type F: Fn(&PipelineData, &Arc<RiscCore>) -> PipelineData + Send + 'static;
 
     fn new(
         name: String,
         process_fn: Self::F,
-        core: Arc<RV32Core>,
+        core: Arc<RiscCore>,
         input_channel: Option<Receiver<PipelinePayload>>,
         output_channel: Option<Sender<PipelinePayload>>,
     ) -> Self;
@@ -90,19 +90,19 @@ pub trait PipelineStageInterface {
     fn run(self) -> std::thread::JoinHandle<()>;
 
     /// extract data from current moment
-    fn extract_data(&self) -> &[u8];
+    fn extract_data(&self) -> &PipelineData;
 
     /// check the current instruction and clock cycle of this pipeline stage
     fn get_current_step(&self) -> (ClockCycle, Instruction);
 }
 
 impl PipelineStageInterface for PipelineStage {
-    type F = fn(&PipelineData, &Arc<RV32Core>) -> PipelineData;
+    type F = fn(&PipelineData, &Arc<RiscCore>) -> PipelineData;
 
     fn new(
         name: String,
         process_fn: Self::F,
-        core: Arc<RV32Core>,
+        core: Arc<RiscCore>,
         input_channel: Option<Receiver<PipelinePayload>>,
         output_channel: Option<Sender<PipelinePayload>>,
     ) -> Self {
@@ -124,54 +124,46 @@ impl PipelineStageInterface for PipelineStage {
                 let pipeline_payload;
                 // read from previous pipeline stage if available
                 match self.input_channel {
-                    Some(ref pipeline_input) => {
-                        match pipeline_input.recv() {
-                            Ok(data_input) => {
-                                self.instruction = data_input.instruction;
-                                self.data = data_input.data;
-                                self.clock_cycle = data_input.clock_cycle;
+                    Some(ref pipeline_input) => match pipeline_input.recv() {
+                        Ok(data_input) => {
+                            self.instruction = data_input.instruction;
+                            self.data = data_input.data;
+                            self.clock_cycle = data_input.clock_cycle;
 
-                                // we use the raki crate as it has a Display feature to print the assembly instruction
-                                // maybe we can use it as the main Instruction struct?
-                                match self.instruction.0.decode(raki::Isa::Rv32) {
-                                    Ok(inst) => tracing::info!(
-                                        "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
-                                        self.name,
-                                        self.clock_cycle,
-                                        inst
-                                    ),
-                                    Err(e) => panic!("decoding failed due to {e:?}"),
-                                };
+                            let asm_instr = rv32_asm(self.instruction.0);
+                            tracing::info!(
+                                "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
+                                self.name,
+                                self.clock_cycle,
+                                asm_instr
+                            );
 
-                                let data_output = (self.process_fn)(&self.data, &self.core);
+                            let data_output = (self.process_fn)(&self.data, &self.core);
 
-                                pipeline_payload = PipelinePayload {
-                                    instruction: self.instruction,
-                                    clock_cycle: data_input.clock_cycle + 1,
-                                    data: data_output,
-                                };
-                            }
-                            Err(e) => {
-                                tracing::info!("{e}");
-                                return;
-                            }
+                            pipeline_payload = PipelinePayload {
+                                instruction: self.instruction,
+                                clock_cycle: data_input.clock_cycle + 1,
+                                data: data_output,
+                            };
                         }
-                    }
+                        Err(e) => {
+                            tracing::info!("{e}");
+                            return;
+                        }
+                    },
 
                     None => {
                         // if there is no input channel, this would mean we are in the fetch stage
                         let data_output = (self.process_fn)(&self.data, &self.core);
                         self.instruction = Instruction(data_output.get_u32(0x0));
 
-                        match self.instruction.0.decode(raki::Isa::Rv32) {
-                            Ok(inst) => tracing::info!(
-                                "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
-                                self.name,
-                                self.clock_cycle,
-                                inst
-                            ),
-                            Err(e) => panic!("decoding failed due to {e:?}"),
-                        };
+                        let asm_instr = rv32_asm(self.instruction.0);
+                        tracing::info!(
+                            "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
+                            self.name,
+                            self.clock_cycle,
+                            asm_instr
+                        );
 
                         self.clock_cycle = self.clock_cycle + 1;
                         pipeline_payload = PipelinePayload {
@@ -184,13 +176,11 @@ impl PipelineStageInterface for PipelineStage {
 
                 //send to next pipeline stage if available
                 match self.output_channel {
-                    Some(ref pipline_output) => {
-                        match pipline_output.send(pipeline_payload) {
-                            Ok(_) => {},
-                            Err(e) => {
-                                tracing::info!("{e}");
-                                return;
-                            }
+                    Some(ref pipline_output) => match pipline_output.send(pipeline_payload) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::info!("{e}");
+                            return;
                         }
                     },
                     None => {}
@@ -199,8 +189,8 @@ impl PipelineStageInterface for PipelineStage {
         })
     }
 
-    fn extract_data(&self) -> &[u8] {
-        &self.data.0
+    fn extract_data(&self) -> &PipelineData {
+        &self.data
     }
 
     fn get_current_step(&self) -> (ClockCycle, Instruction) {

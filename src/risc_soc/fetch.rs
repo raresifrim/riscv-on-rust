@@ -1,11 +1,11 @@
-use crate::{pipeline_stage::PipelineData, rv32::cache::CacheDataRequest};
-use crate::rv32::rv32::RV32Core;
-use crate::cache::MemoryRequestType;
+use super::{pipeline_stage::PipelineData};
+use crate::risc_soc::risc_soc::RiscCore;
 use std::sync::{Arc, RwLock};
-use std::thread::{self, sleep};
-use crate::rv32::rv32::WordSize;
+use std::thread::{sleep};
+use crate::risc_soc::memory_management_unit::{Address, MemoryRequest, MemoryRequestType};
+use crate::risc_soc::risc_soc::WordSize;
 
-pub fn rv32_fetch_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RV32Core>>) -> PipelineData {
+pub fn rv32_mcu_fetch_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RiscCore>>) -> PipelineData {
     
     //as the fetch stage is the one that dictates th entire flow
     //we emulate a system clock here with a period of 1ms 
@@ -17,8 +17,8 @@ pub fn rv32_fetch_stage(pipeline_reg: &PipelineData, rv32_core: &Arc<RwLock<RV32
     core.set_pc(current_pc + 4);
 
     //get instruction from the current address
-    let request = CacheDataRequest{request_type: MemoryRequestType::READ, data_address: current_pc as usize, data_size: WordSize::WORD, data:None};
-    let response = core.icache_request(request);
+    let request = MemoryRequest{request_type: MemoryRequestType::READ, data_address: current_pc as Address, data_size: WordSize::WORD, data:None};
+    let response = core.icache_read(request);
     let mut instruction = response.data;
     instruction.extend_from_slice(&current_pc.to_le_bytes());
 
