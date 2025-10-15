@@ -1,8 +1,6 @@
 mod risc_soc;
-mod rv32_baremetal;
+mod rv32i_baremetal;
 use tracing_subscriber::{EnvFilter, fmt};
-
-use crate::risc_soc::risc_soc::RiscCore;
 
 fn main() {
     fmt::fmt()
@@ -12,7 +10,7 @@ fn main() {
         .init();
 
     tracing::info!("Initializing RISCV32 runtime environment");
-
-    let rv32i_core = RiscCore::new(4);
-    rv32i_core.load_binary("./qemu_playground/test_microblaze.elf".to_string());
+    let mut rv32i_core = rv32i_baremetal::core::init_core();
+    rv32i_baremetal::core::load_elf(&mut rv32i_core, "./qemu_playground/test_microblaze.elf");
+    rv32i_core.run();
 }

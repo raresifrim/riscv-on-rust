@@ -4,7 +4,7 @@ use std::{fmt::Debug};
 
 pub type Address = u64;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MemoryRequestType {
     READ,
     WRITE
@@ -41,6 +41,7 @@ pub enum MemoryDeviceType {
 }
 
 /// TODO: add methods for converting u8/u16/u32 etc to data vec for memory request
+#[derive(Clone)]
 pub struct MemoryRequest {
     pub request_type: MemoryRequestType,
     pub data_address: Address,
@@ -79,6 +80,9 @@ pub trait MemoryDevice {
     /// address specified here is the physical address of this memory array
     fn init_mem(&mut self, address: Address, data: &[u8]);
 
+    /// helper function to debug various aspects of the memory
+    fn debug(&self) -> std::fmt::Result;
+
 }
 
 
@@ -88,13 +92,13 @@ pub trait MemoryDevice {
 /// A process function can be passed to it, where it processes a memory request, and it can return a memory response to the CPU
 pub struct MemoryManagementUnit {
     memmap: AHashMap<MemoryDeviceType, Box<dyn MemoryDevice + Send + Sync>>,
-    process_fn: fn(&Self, MemoryRequest) -> Option<MemoryResponse>,
+    process_fn: fn(&mut Self, MemoryRequest) -> MemoryResponse,
 }
 
 impl MemoryManagementUnit {
     pub fn new(
         memmap: AHashMap<MemoryDeviceType, Box<dyn MemoryDevice + Send + Sync>>,
-        process_fn: fn(&Self, MemoryRequest) -> Option<MemoryResponse>, 
+        process_fn: fn(&mut Self, MemoryRequest) -> MemoryResponse, 
     ) -> Self {
         Self { memmap, process_fn}
     }
@@ -103,6 +107,10 @@ impl MemoryManagementUnit {
         
         if self.memmap.contains_key(&memory_device.get_memory_type()) {
             panic!("There is already a device of this type defined in the MMU!");
+        }
+
+        if memory_device.get_memory_type() < MemoryDeviceType::L2CACHE {
+            panic!("The Memory Management Unit is responsable for handling memories starting at the L2 cache in the memory hierarchy")
         }
 
         if memory_device.get_memory_type() > MemoryDeviceType::LLCACHE {
@@ -118,6 +126,21 @@ impl MemoryManagementUnit {
         
         self.memmap.insert(memory_device.get_memory_type(), memory_device);
     }
+
+    pub fn init_section_into_memory(&mut self, address: Address, data: &[u8]) {
+        for device in &mut self.memmap{
+            let (start_address, end_address) = device.1.start_end_addresses();
+            if address >= start_address && address < end_address {
+                assert!(address + data.len() as Address <= end_address);   
+                device.1.init_mem(address, data); 
+            }
+        }   
+    }
+
+    pub fn process_memory_request(&mut self, memory_request: MemoryRequest) -> MemoryResponse {
+        (self.process_fn)(self, memory_request)
+    }
+
 }
 
 impl Debug for MemoryManagementUnit {
@@ -134,7 +157,7 @@ impl Default for MemoryManagementUnit {
     fn default() -> Self {
         Self { 
             memmap: AHashMap::default(),
-            process_fn: |_self, _request| {None}
+            process_fn: |_self, _request| MemoryResponse { data: vec![], status: MemoryResponseType::Valid }
         }
     }
 }

@@ -1,4 +1,6 @@
-use crate::risc_soc::memory_management_unit::MemoryResponseType;
+use std::ptr::null;
+
+use crate::risc_soc::memory_management_unit::{MemoryManagementUnit, MemoryResponseType};
 use crate::risc_soc::{
     memory_management_unit::{
         Address, MemoryDevice, MemoryDeviceType, MemoryRequest,
@@ -81,7 +83,7 @@ impl MemoryDevice for MCUCache {
                     panic!("Made a request to store no data in cache memory!");
                 }
             };
-            let cache_response = self.store_data(request.data_address,  data);
+            let cache_response = self.store_data(request.data_address, data);
             MemoryResponse{
                 data: vec![],
                 status: cache_response.status
@@ -94,8 +96,8 @@ impl MemoryDevice for MCUCache {
     fn read_request(&self, request: MemoryRequest) -> MemoryResponse {
         assert!(request.request_type == MemoryRequestType::READ);
         let cache_response = self.load_data(request.data_address);
-        let byte_index = request.data_address % self.line_size as u64; 
-        let mut data = vec![];
+        let byte_index = (request.data_address - self.start_address) % self.line_size as u64; 
+        let mut data = vec![0u8; request.data_size as usize];
         for i in 0..request.data_size as usize{
             data[i] = cache_response.cache_line[byte_index as usize + i];
         }
@@ -103,15 +105,18 @@ impl MemoryDevice for MCUCache {
     }
 
     fn init_mem(&mut self, address: Address, data: &[u8]) {
-        assert!(
-            address >= self.start_address && address + data.len() as Address <= self.end_address
-        );
         for byte in 0..data.len() {
             let current_address = address as usize + byte;
             let byte_index = current_address % self.line_size;
-            let row_index = current_address % self.num_lines;
+            let row_index = current_address / self.line_size;
             self.data[row_index][byte_index] = data[byte];
         }
+    }
+
+    fn debug(&self) -> std::fmt::Result {
+        println!("Memory {:?} =>", self.memory_type);
+        println!("{:X?}", self);
+        Ok(())
     }
 }
 
@@ -147,7 +152,7 @@ impl Cache for MCUCache {
     }
 
     fn load_data(&self, address: Address) -> CacheResponse {
-        let mut response = self.is_address_hit(address);
+        let mut response = self.translate_address(address);
 
         if response.status == MemoryResponseType::CacheHit {
             // as in a real processor, data is copied from memory to a register
@@ -166,7 +171,7 @@ impl Cache for MCUCache {
     /// for data store, is the other way: we receive a byte array and its size and we store it in the memory
     /// its the job of the processor to give as an exact array, but if it passes a larger array, we use the provided size to store the needed amount
     fn store_data(&mut self, address: Address, data: Vec<u8>) -> CacheResponse {
-        let mut response = self.is_address_hit(address);
+        let mut response = self.translate_address(address);
 
         if response.status == MemoryResponseType::CacheHit {
             let byte_index = address % self.line_size as u64;
@@ -187,7 +192,10 @@ impl Cache for MCUCache {
         response
     }
 
-    fn is_address_hit(&self, address: Address) -> CacheResponse {
+    /// We are using this cache memory as direct ram/rom memory for our baremetal CPU
+    /// So we are using the start and end address to define the memory regions for .text and .data sections
+    /// And whatever Virtual Address we are receiving, we are subtractng the defined start address from it
+    fn translate_address(&self, address: Address) -> CacheResponse {
         if address > self.end_address || address < self.start_address {
             return CacheResponse {
                 cache_line: vec![],
@@ -196,8 +204,8 @@ impl Cache for MCUCache {
                 status: MemoryResponseType::WrongMemoryMap,
             };
         }
-
-        let row_index = address % self.num_lines as u64;
+        let address = address - self.start_address;
+        let row_index = address / self.num_lines as u64;
         CacheResponse {
             cache_line: vec![],
             index: row_index,

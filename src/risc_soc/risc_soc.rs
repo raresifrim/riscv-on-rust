@@ -1,13 +1,17 @@
 use super::pipeline_stage::*;
-use crate::risc_soc::cache::{Cache};
-use crate::risc_soc::memory_management_unit::{MemoryManagementUnit, MemoryRequest, MemoryResponse};
+use crate::risc_soc::cache::Cache;
+use crate::risc_soc::memory_management_unit::{
+    Address, MemoryDeviceType, MemoryManagementUnit, MemoryRequest, MemoryRequestType,
+    MemoryResponse, MemoryResponseType,
+};
+use object::read::elf::{FileHeader, SectionHeader};
+use object::{Endianness, elf};
 use std::fmt::Debug;
+use std::fs;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicU64;
-use std::fs;
-use object::{elf, Endianness};
-use object::read::elf::{FileHeader, SectionHeader};
+use std::sync::{Arc, RwLock, Weak};
 
 /// type used to represent data inside the RiscCore (defaulted to u32 for RV32)
 /// can be overwritten to u64 if RV64 is intended for implementation
@@ -22,20 +26,18 @@ pub enum WordSize {
     DOUBLE = 8,
 }
 
-
 pub struct RiscCore {
-    pub stages: Vec<PipelineStage>,
-    icache: Option<Box<dyn Cache + Send + Sync>>,
-    dcache: Option<Box<dyn Cache + Send + Sync>>,
+    pub stages: Vec<Arc<RwLock<PipelineStage>>>,
+    pub icache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
+    pub dcache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub registers: Registers,
     pub program_counter: AtomicU64,
-    mmu: MemoryManagementUnit
+    pub mmu: Arc<RwLock<MemoryManagementUnit>>,
+    pub clock_period: u128, //nanoseconds
 }
 
 impl RiscCore {
-    pub fn new(
-        num_stages: usize
-    ) -> Self {
+    pub fn new(num_stages: usize, clock_period: u128) -> Self {
         // create an empty array of stages
         let stages = Vec::with_capacity(num_stages);
         Self {
@@ -44,51 +46,60 @@ impl RiscCore {
             dcache: None,
             registers: Registers::default(),
             program_counter: AtomicU64::new(0x8000_0000),
-            mmu: MemoryManagementUnit::default()
+            mmu: Arc::new(RwLock::new(MemoryManagementUnit::default())),
+            clock_period,
         }
     }
 
-    pub fn add_l1_icache(
+    pub fn add_l1_cache(
         &mut self,
         icache: Box<dyn Cache + Send + Sync>,
-        dcache: Box<dyn Cache + Send + Sync>
+        dcache: Box<dyn Cache + Send + Sync>,
     ) -> &mut Self {
-        self.icache = Some(icache);
-        self.dcache = Some(dcache);
+        self.icache = Some(Arc::new(RwLock::new(icache)));
+        self.dcache = Some(Arc::new(RwLock::new(dcache)));
         self
     }
 
-    pub fn add_mmu(&mut self, mmu: MemoryManagementUnit){
-        self.mmu = mmu;
+    pub fn add_mmu(&mut self, mmu: MemoryManagementUnit) {
+        self.mmu = Arc::new(RwLock::new(mmu));
     }
 
-    pub fn icache_read(&self, request: MemoryRequest) -> MemoryResponse {
+    pub fn set_clock_period(&mut self, nanosecs: u128) {
+        self.clock_period = nanosecs;
+    }
+
+    pub fn icache_request(&self, request: MemoryRequest) -> MemoryResponse {
         if self.icache.is_some() {
-            self.icache.as_ref().unwrap().read_request(request)
+            let cache_response = self
+                .icache.as_ref()
+                .unwrap()
+                .write()
+                .unwrap()
+                .send_data_request(request.clone());
+            if cache_response.status == MemoryResponseType::CacheHit {
+                cache_response
+            } else {
+                self.mmu.write().unwrap().process_memory_request(request)
+            }
         } else {
             panic!("An L1Cache request was made, but there is no L1Cache configured on this core!")
         }
     }
 
-    pub fn dcache_read(&self, request: MemoryRequest) -> MemoryResponse {
+    pub fn dcache_request(&self, request: MemoryRequest) -> MemoryResponse {
         if self.dcache.is_some() {
-            self.dcache.as_ref().unwrap().read_request(request)
-        } else {
-           panic!("An L1Cache request was made, but there is no L1Cache configured on this core!") 
-        }
-    }
-    
-    pub fn icache_write(&mut self, request: MemoryRequest) -> MemoryResponse {
-        if self.icache.is_some() {
-            self.icache.as_mut().unwrap().send_data_request(request)
-        } else {
-            panic!("An L1Cache request was made, but there is no L1Cache configured on this core!")
-        }
-    }
-
-    pub fn dcache_write(&mut self, request: MemoryRequest) -> MemoryResponse {
-        if self.dcache.is_some() {
-            self.dcache.as_mut().unwrap().send_data_request(request)
+            let cache_response = self
+                .dcache.as_ref()
+                .unwrap()
+                .write()
+                .unwrap()
+                .send_data_request(request.clone());
+            if cache_response.status == MemoryResponseType::CacheHit {
+                cache_response
+            } else {
+                self.mmu.write().unwrap().process_memory_request(request)
+            }
         } else {
             panic!("An L1Cache request was made, but there is no L1Cache configured on this core!")
         }
@@ -97,52 +108,194 @@ impl RiscCore {
     /// dynamically add stages to the processor creating a custom pipeline
     /// stages should be created before hand and passed here already initialized
     pub fn add_stage(&mut self, stage: PipelineStage) -> &mut Self {
-        self.stages.push(stage);
+        if self.stages.len() + 1 == self.stages.capacity() {
+            panic!("Trying to add more stages then configured for current core!");
+        }
+        self.stages.push(Arc::new(RwLock::new(stage)));
         self
     }
 
     /// load a binary file containing the code to be executed
-    pub fn load_binary(&self, elf_path: String) {
+    pub fn load_binary(&mut self, elf_path: &str, memory_device: MemoryDeviceType) {
         let data = fs::read(elf_path).expect("Could not read provided elf file path");
-        let elf = elf::FileHeader32::<object::Endianness>::parse(&*data).expect("Failed to parse elf");
-        
+        let elf =
+            elf::FileHeader32::<object::Endianness>::parse(&*data).expect("Failed to parse elf");
+
         let endian = elf.endian().expect("Failed to parse endianess");
         assert!(endian == Endianness::Little);
 
         //read sections
-        let sections = elf.sections(endian, &*data).expect("Failed to parse sections of elf file");
-        for section in sections.iter() {
+        let sections = elf
+            .sections(endian, &*data)
+            .expect("Failed to parse sections of elf file");
+        let section_headers = sections.iter().filter(|x| {
             let mut name: String = Default::default();
-            sections.section_name(endian, section).unwrap().read_to_string(&mut name).unwrap();
-            let data = section.data(endian, &*data).expect("Failed to read section data");
-            let address = section.sh_addr.get(endian);
+            sections
+                .section_name(endian, x)
+                .unwrap()
+                .read_to_string(&mut name)
+                .unwrap();
+            name.contains(".text")
+                || name.contains(".data")
+                || name.contains(".sdata")
+                || name.contains(".rodata")
+                || name.contains(".bss")
+                || name.contains(".sbss")
+        });
+        for section in section_headers {
+            let mut name: String = Default::default();
+            sections
+                .section_name(endian, section)
+                .unwrap()
+                .read_to_string(&mut name)
+                .unwrap();
+            let data = section
+                .data(endian, &*data)
+                .expect("Failed to read section data");
+            let address = section.sh_addr.get(endian) as Address;
             let size = section.sh_size.get(endian);
             println!("{name} @{:X}:{:X}", address, size);
-            println!("Data: {:?}",data);
+            println!("Data: {:?}", data);
+
+            if memory_device < MemoryDeviceType::L2CACHE {
+                // in the case where we are using cache memories as the only level of memory
+                // we split the sections as .text in icache and everything else in dcache
+                assert!(self.icache.is_some() && self.dcache.is_some());
+                let mut icache = self.icache.as_ref().unwrap().write().unwrap();
+                let mut dcache = self.dcache.as_ref().unwrap().write().unwrap();
+                if name.contains(".text") {
+                    let (start, end) = icache.start_end_addresses();
+                    let cache_size = icache.size();
+                    assert!(
+                        address >= start
+                            && address < end
+                            && (address - start) as usize + data.len() < cache_size
+                    );
+                    icache.init_mem(address - start, data);
+                } else {
+                    let (start, end) = dcache.start_end_addresses();
+                    let cache_size = dcache.size();
+                    assert!(
+                        address >= start
+                            && address < end
+                            && (address - start) as usize + data.len() < cache_size
+                    );
+                    dcache.init_mem(address - start, data);
+                }
+
+            } else {
+                //map to the selected memory device (ex. DRAM)
+                // here, usually all sections will be mapped in same memory region
+                let mut mmu = self.mmu.write().unwrap();
+                mmu.init_section_into_memory(address as Address, data);
+            }
         }
-        
     }
 
     pub fn get_pc(&self) -> RiscWord {
-        self.program_counter.load(std::sync::atomic::Ordering::SeqCst) as RiscWord
+        self.program_counter
+            .load(std::sync::atomic::Ordering::SeqCst) as RiscWord
     }
 
-    pub fn set_pc(&self, pc:RiscWord) {
-        self.program_counter.store(pc as u64, std::sync::atomic::Ordering::SeqCst);
+    pub fn set_pc(&self, pc: RiscWord) {
+        self.program_counter
+            .store(pc as u64, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// start execution of loaded program
-    pub fn run(self) {
+    pub fn run(&mut self) {
         //start execution of all stages
-        let mut handlers = vec![];
-        for pipeline_stage in self.stages {
-            handlers.push(pipeline_stage.run());
-        }
+        use crate::risc_soc::instruction_asm::rv32_asm;
+        use std::thread::sleep;
+        use std::time::Instant;
 
-        //wait for all stages to finish execution
-        for h in handlers {
-            h.join().unwrap();
-        }
+        std::thread::scope(|s| {
+            
+            for arc_stage in &self.stages {
+                s.spawn(|| {
+            let clock_period = self.clock_period;
+            loop {
+
+                let mut stage = arc_stage.write().unwrap();
+                let period_start = Instant::now();
+
+                let pipeline_payload;
+                // read from previous pipeline stage if available
+                match stage.input_channel {
+                    Some(ref pipeline_input) => match pipeline_input.recv() {
+                        Ok(data_input) => {
+                            stage.instruction = data_input.instruction;
+                            stage.data = data_input.data;
+                            stage.clock_cycle = data_input.clock_cycle;
+
+                            let asm_instr = rv32_asm(stage.instruction.0);
+                            tracing::info!(
+                                "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
+                                stage.name,
+                                stage.clock_cycle,
+                                asm_instr
+                            );
+
+                            let data_output = (stage.process_fn)(&stage.data, self);
+
+                            pipeline_payload = PipelinePayload {
+                                instruction: stage.instruction,
+                                clock_cycle: data_input.clock_cycle + 1,
+                                data: data_output,
+                            };
+                        }
+                        Err(e) => {
+                            tracing::info!("{e}");
+                            return;
+                        }
+                    },
+
+                    None => {
+                        // if there is no input channel, this would mean we are in the fetch stage
+                        let data_output = (stage.process_fn)(&stage.data, self);
+                        stage.instruction = Instruction(data_output.get_u32(0x0));
+                        let asm_instr = rv32_asm(stage.instruction.0);
+                        tracing::info!(
+                            "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
+                            stage.name,
+                            stage.clock_cycle,
+                            asm_instr
+                        );
+
+                        stage.clock_cycle = stage.clock_cycle + 1;
+                        pipeline_payload = PipelinePayload {
+                            instruction: stage.instruction,
+                            clock_cycle: stage.clock_cycle,
+                            data: data_output,
+                        };
+                    }
+                };
+
+                //send to next pipeline stage if available
+                match stage.output_channel {
+                    Some(ref pipline_output) => match pipline_output.send(pipeline_payload) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::info!("{e}");
+                            return;
+                        }
+                    },
+                    None => {}
+                }
+
+                let elapsed_period = period_start.elapsed();
+                let period = elapsed_period.as_nanos();
+                if period < clock_period {
+                    //complete remainder of clock period
+                    sleep(std::time::Duration::from_nanos((clock_period - period) as u64));
+                } else {
+                    // otherwise treat it as a warning
+                    tracing::warn!("Pipeline stage {} execution time is taking longer then the configured clock period by {} nanosecs.", stage.name, period - clock_period);
+                }
+            }
+        });
+            }
+        });
     }
 }
 
@@ -160,20 +313,23 @@ impl DerefMut for RiscCore {
 }
 
 #[derive(Debug, Default)]
-pub struct Registers([RiscWord; 32]);
+pub struct Registers([AtomicU64; 32]);
 
 impl Registers {
     pub fn read_regs(&self, rs1_address: usize, rs2_address: usize) -> (RiscWord, RiscWord) {
         assert!(rs1_address < 32);
         assert!(rs2_address < 32);
-        (self.0[rs1_address], self.0[rs2_address])
+        (
+            self.0[rs1_address].load(std::sync::atomic::Ordering::SeqCst) as RiscWord, 
+            self.0[rs2_address].load(std::sync::atomic::Ordering::SeqCst) as RiscWord
+        )
     }
 
-    pub fn write_reg(&mut self, rd_address: usize, rd: RiscWord) {
+    pub fn write_reg(&self, rd_address: usize, rd: RiscWord) {
         assert!(rd_address < 32);
         if rd_address > 0 {
             //should never overwrite x0
-            self.0[rd_address] = rd;
+            self.0[rd_address].store(rd as u64, std::sync::atomic::Ordering::SeqCst);
         }
     }
 }
