@@ -1,23 +1,21 @@
 use crate::risc_soc::pipeline_stage::PipelineData;
 use crate::risc_soc::risc_soc::RiscCore;
-use std::ops::DerefMut;
-use std::sync::{Arc, RwLock};
-use std::u32;
 use crate::risc_soc::pipeline_stage::PipelineStageInterface;
+use std::u32;
 
 /// FUNC7 and FUNCT3 field lengths
-const FUNCT_7L: u8 = 7;
-const FUNCT_3L: u8 = 3;
-const FUNCT_7_MASK: u32 = 0b1111111;
-const FUNCT_3_MASK: u32 = 0b111;
+pub const FUNCT_7L: u8 = 7;
+pub const FUNCT_3L: u8 = 3;
+pub const FUNCT_7_MASK: u32 = 0b1111111;
+pub const FUNCT_3_MASK: u32 = 0b111;
 
 /// OPCODE field lendth
-const OPCODE_L: u8 = 7;
-const OPCODE_MASK: u32 = 0b1111111;
+pub const OPCODE_L: u8 = 7;
+pub const OPCODE_MASK: u32 = 0b1111111;
 
 /// Register Index size
-const REG_L: u8 = 5;
-const REG_MASK: u32 = 0b11111;
+pub const REG_L: u8 = 5;
+pub const REG_MASK: u32 = 0b11111;
 
 // RISC-V Base Instruction Set Opcodes
 pub const OP_LUI    :u8 = 0b0110111; // Load Upper Immediate
@@ -34,7 +32,6 @@ pub const OP_SYSTEM :u8 = 0b1110011; // System Instructions (ECALL, EBREAK, etc.
 
 pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) -> PipelineData {
 
-
     // we are expecting to get an instruction and the the program counter, both being 32-bits
     assert!(pipeline_reg.0.len() == 8);
 
@@ -47,12 +44,14 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
     let rd_address = ((instruction >> OPCODE_L) & REG_MASK) as u8;
     let rs1_address = ((instruction >> (OPCODE_L + REG_L + FUNCT_3L)) & REG_MASK) as u8;
     let rs2_address = ((instruction >> (OPCODE_L + 2*REG_L + FUNCT_3L)) & REG_MASK) as u8; 
-    //get func3 and funct7
+    // get func3 and funct7
     let func3 = ((instruction >> (OPCODE_L + REG_L)) & FUNCT_3_MASK) as u8;  
     let func7 = ((instruction >> (OPCODE_L + 3*REG_L + FUNCT_3L)) & FUNCT_7_MASK) as u8;
     
+    let branch_or_jump: u8 = (opcode == OP_BRANCH || opcode == OP_JAL || opcode == OP_JALR) as u8;
+
     let reg_write = match opcode {
-       OP_ALUI | OP_LOAD | OP_JALR | OP_ALU | OP_LUI | OP_AUIPC => 1u8,
+       OP_ALUI | OP_LOAD | OP_JALR | OP_ALU | OP_LUI | OP_AUIPC | OP_JAL => 1u8,
        _ => 0u8 
     };
 
@@ -90,14 +89,16 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
     //leave read of regs at the end
     //first check commit stage(4th in our case) and see if there is a register to commit first as it might be needed for one of the rs
     
-    //let commit_stage = rv32_core.stages[3].read().unwrap();
-    //let commit_data = commit_stage.extract_data();
-    //let commit_rd_address = commit_data.get_u8(0x0) & REG_MASK as u8;
-    //let commit_rd = commit_data.get_u32(0x1); 
-    //let commit_reg = commit_data.get_u8(0x5);
-    //if commit_reg == 0x1 {
-    //    rv32_core.write_reg(commit_rd_address as usize, commit_rd);
-    //}
+    let commit_stage = rv32_core.stages[3].read().unwrap();
+    let commit_data = commit_stage.extract_data();
+    if !commit_data.0.is_empty() {
+        let commit_rd_address = commit_data.get_u8(0x2) & REG_MASK as u8;
+        let commit_rd = commit_data.get_u32(0x5); 
+        let commit_reg = commit_data.get_u8(0x0);
+        if commit_reg == 0x1 {
+            rv32_core.write_reg(commit_rd_address as usize, commit_rd);
+        }
+    }
     let (rs1, rs2) = rv32_core.read_regs(rs1_address as usize, rs2_address as usize);
 
     //concatanate add data into the pipeline register for next stage
@@ -108,10 +109,13 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
     pipeline_out.push(reg_write);
     pipeline_out.push(mem_read_write);
     pipeline_out.push(rd_address);
+    pipeline_out.push(branch_or_jump);
     pipeline_out.extend_from_slice(&imm.to_le_bytes());
     pipeline_out.extend_from_slice(&rs1.to_le_bytes());
     pipeline_out.extend_from_slice(&rs2.to_le_bytes());
     pipeline_out.extend_from_slice(&pc.to_le_bytes());
+    pipeline_out.push(rs1_address);
+    pipeline_out.push(rs2_address);
 
     PipelineData(pipeline_out)
 

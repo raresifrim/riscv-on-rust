@@ -1,7 +1,7 @@
 use super::pipeline_stage::*;
 use crate::risc_soc::cache::Cache;
 use crate::risc_soc::memory_management_unit::{
-    Address, MemoryDeviceType, MemoryManagementUnit, MemoryRequest, MemoryRequestType,
+    Address, MemoryDeviceType, MemoryManagementUnit, MemoryRequest,
     MemoryResponse, MemoryResponseType,
 };
 use object::read::elf::{FileHeader, SectionHeader};
@@ -11,7 +11,7 @@ use std::fs;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 
 /// type used to represent data inside the RiscCore (defaulted to u32 for RV32)
 /// can be overwritten to u64 if RV64 is intended for implementation
@@ -108,7 +108,7 @@ impl RiscCore {
     /// dynamically add stages to the processor creating a custom pipeline
     /// stages should be created before hand and passed here already initialized
     pub fn add_stage(&mut self, stage: PipelineStage) -> &mut Self {
-        if self.stages.len() + 1 == self.stages.capacity() {
+        if self.stages.len() + 1 > self.stages.capacity() {
             panic!("Trying to add more stages then configured for current core!");
         }
         self.stages.push(Arc::new(RwLock::new(stage)));
@@ -213,87 +213,94 @@ impl RiscCore {
             
             for arc_stage in &self.stages {
                 s.spawn(|| {
-            let clock_period = self.clock_period;
-            loop {
+                    let clock_period = self.clock_period;
+                    loop {
 
-                let mut stage = arc_stage.write().unwrap();
-                let period_start = Instant::now();
+                        let mut stage = arc_stage.write().unwrap();
+                        let period_start = Instant::now();
 
-                let pipeline_payload;
-                // read from previous pipeline stage if available
-                match stage.input_channel {
-                    Some(ref pipeline_input) => match pipeline_input.recv() {
-                        Ok(data_input) => {
-                            stage.instruction = data_input.instruction;
-                            stage.data = data_input.data;
-                            stage.clock_cycle = data_input.clock_cycle;
+                        let pipeline_payload;
+                        // read from previous pipeline stage if available
+                        match stage.input_channel {
+                            Some(ref pipeline_input) => match pipeline_input.try_recv() {
+                                Ok(data_input) => {
+                                    stage.instruction = data_input.instruction;
+                                    stage.data = data_input.data;
+                                    stage.clock_cycle = data_input.clock_cycle;
 
-                            let asm_instr = rv32_asm(stage.instruction.0);
-                            tracing::info!(
-                                "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
-                                stage.name,
-                                stage.clock_cycle,
-                                asm_instr
-                            );
+                                    let asm_instr = rv32_asm(stage.instruction.0);
+                                    tracing::info!(
+                                        "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
+                                        stage.name,
+                                        stage.clock_cycle,
+                                        asm_instr,
+                                        stage.instruction.0
+                                    );
 
-                            let data_output = (stage.process_fn)(&stage.data, self);
+                                    let data_output = (stage.process_fn)(&stage.data, self);
 
-                            pipeline_payload = PipelinePayload {
-                                instruction: stage.instruction,
-                                clock_cycle: data_input.clock_cycle + 1,
-                                data: data_output,
-                            };
-                        }
-                        Err(e) => {
-                            tracing::info!("{e}");
-                            return;
-                        }
-                    },
+                                    pipeline_payload = PipelinePayload {
+                                        instruction: stage.instruction,
+                                        clock_cycle: data_input.clock_cycle + 1,
+                                        data: data_output,
+                                    };
+                                }
+                                Err(_e) => {
+                                    //tracing::info!("{e}");
+                                    continue;
+                                }
+                            },
 
-                    None => {
-                        // if there is no input channel, this would mean we are in the fetch stage
-                        let data_output = (stage.process_fn)(&stage.data, self);
-                        stage.instruction = Instruction(data_output.get_u32(0x0));
-                        let asm_instr = rv32_asm(stage.instruction.0);
-                        tracing::info!(
-                            "Pipeline Stage {} @ClockCycle {} -> Instruction:{}",
-                            stage.name,
-                            stage.clock_cycle,
-                            asm_instr
-                        );
+                            None => {
+                                // if there is no input channel, this would mean we are in the fetch stage
+                                let data_output = (stage.process_fn)(&stage.data, self);
+                                stage.instruction = Instruction(data_output.get_u32(0x0));
+                        
+                                let asm_instr = rv32_asm(stage.instruction.0);
+                                tracing::info!(
+                                    "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
+                                    stage.name,
+                                    stage.clock_cycle,
+                                    asm_instr,
+                                    stage.instruction.0
+                                );
 
-                        stage.clock_cycle = stage.clock_cycle + 1;
-                        pipeline_payload = PipelinePayload {
-                            instruction: stage.instruction,
-                            clock_cycle: stage.clock_cycle,
-                            data: data_output,
+                                stage.clock_cycle = stage.clock_cycle + 1;
+                                pipeline_payload = PipelinePayload {
+                                    instruction: stage.instruction,
+                                    clock_cycle: stage.clock_cycle,
+                                    data: data_output,
+                                };
+                            }
                         };
-                    }
-                };
 
-                //send to next pipeline stage if available
-                match stage.output_channel {
-                    Some(ref pipline_output) => match pipline_output.send(pipeline_payload) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::info!("{e}");
-                            return;
+                        //send to next pipeline stage if available
+                        match stage.output_channel {
+                            Some(ref pipline_output) => match pipline_output.send(pipeline_payload) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::info!("{e}");
+                                    return;
+                                }
+                            },
+                            None => {}
                         }
-                    },
-                    None => {}
-                }
 
-                let elapsed_period = period_start.elapsed();
-                let period = elapsed_period.as_nanos();
-                if period < clock_period {
-                    //complete remainder of clock period
-                    sleep(std::time::Duration::from_nanos((clock_period - period) as u64));
-                } else {
-                    // otherwise treat it as a warning
-                    tracing::warn!("Pipeline stage {} execution time is taking longer then the configured clock period by {} nanosecs.", stage.name, period - clock_period);
-                }
-            }
-        });
+                        let elapsed_period = period_start.elapsed();
+                        let period = elapsed_period.as_nanos();
+                        if period < clock_period {
+                            //complete remainder of clock period
+                            sleep(std::time::Duration::from_nanos((clock_period - period) as u64));
+                        } else {
+                            // otherwise treat it as a warning
+                            tracing::warn!(
+                                "Pipeline stage {} execution time is taking longer then the configured clock period by {} nanosecs.",
+                                stage.name, 
+                                period - clock_period
+                            );
+                        }
+                    }
+                });
             }
         });
     }

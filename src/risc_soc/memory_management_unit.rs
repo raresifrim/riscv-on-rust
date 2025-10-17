@@ -59,7 +59,7 @@ pub trait MemoryDevice {
 
     /// minumum amount of info required for a new memory device
     /// should always check that end_address is higher then start_address
-    fn new(cache_type: MemoryDeviceType, start_address: Address, end_address: Address) -> Self where Self:Sized;
+    fn new(memory_type: MemoryDeviceType, start_address: Address, end_address: Address) -> Self where Self:Sized;
 
     //general data request for both read and write
     fn send_data_request(&mut self, request: MemoryRequest) -> MemoryResponse;
@@ -93,6 +93,8 @@ pub trait MemoryDevice {
 pub struct MemoryManagementUnit {
     memmap: AHashMap<MemoryDeviceType, Box<dyn MemoryDevice + Send + Sync>>,
     process_fn: fn(&mut Self, MemoryRequest) -> MemoryResponse,
+    // TODO: add TLB
+    // TODO: add another structure to cache/hold the mapping between an address and the memory device
 }
 
 impl MemoryManagementUnit {
@@ -137,6 +139,7 @@ impl MemoryManagementUnit {
         }   
     }
 
+    /// the main logic of the MemoryManagementUnit  whould be handled in its process_fn, includinf thigs such as address translation
     pub fn process_memory_request(&mut self, memory_request: MemoryRequest) -> MemoryResponse {
         (self.process_fn)(self, memory_request)
     }
@@ -153,11 +156,21 @@ impl Debug for MemoryManagementUnit {
 }
 
 /// If a MMU is not needed, it can be defaulted to this, which creates an empty structure
+/// But it provides a basic process function which checks the data request address and forwards it to an available device in that memory range
 impl Default for MemoryManagementUnit {
     fn default() -> Self {
         Self { 
             memmap: AHashMap::default(),
-            process_fn: |_self, _request| MemoryResponse { data: vec![], status: MemoryResponseType::Valid }
+            process_fn: |_self, _request| {
+                assert!(!_self.memmap.is_empty());
+                for device in &mut _self.memmap {
+                    let (start_address, end_address) = device.1.start_end_addresses();
+                    if _request.data_address >= start_address && _request.data_address < end_address {
+                        return device.1.send_data_request(_request);
+                    }
+                }
+                MemoryResponse { data: vec![], status: MemoryResponseType::InvalidAddress }
+            }
         }
     }
 }

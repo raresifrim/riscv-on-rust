@@ -1,10 +1,6 @@
-use super::instruction_asm::rv32_asm;
 use crate::risc_soc::risc_soc::RiscCore;
 use crossbeam_channel::{Receiver, Sender};
-use std::sync::{Arc, RwLock};
-use std::thread::sleep;
-use std::time::Instant;
-
+use std::ops::{Deref, DerefMut};
 #[derive(Debug, Default)]
 pub struct PipelineData(pub Vec<u8>);
 
@@ -120,5 +116,18 @@ impl PipelineStageInterface for PipelineStage {
 
     fn get_current_step(&self) -> (ClockCycle, Instruction) {
         (self.clock_cycle, self.instruction)
+    }
+}
+
+impl Deref for PipelineStage {
+    type Target = PipelineData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for PipelineStage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
     }
 }
