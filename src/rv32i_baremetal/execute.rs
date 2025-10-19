@@ -1,13 +1,19 @@
 use crate::risc_soc::risc_soc::RiscCore;
 use crate::risc_soc::{pipeline_stage::PipelineData, risc_soc::RiscWord};
-use crate::rv32i_baremetal::decode::{OP_ALU, OP_ALUI, OP_AUIPC, OP_BRANCH, OP_JAL, OP_JALR, OP_LOAD, OP_LUI, OP_STORE, REG_MASK};
-use crate::risc_soc::pipeline_stage::PipelineStageInterface;
+use crate::rv32i_baremetal::core::{EX_STAGE, WB_STAGE};
+use crate::rv32i_baremetal::decode::REG_MASK;
+use crate::rv32i_baremetal::decode::{
+    OP_ALU, OP_ALUI, OP_AUIPC, OP_BRANCH, OP_JAL, OP_JALR, OP_LOAD, OP_LUI, OP_STORE,
+};
 use std::u32;
 
 pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) -> PipelineData {
     // we are expecting to get an instruction and the the program counter, both being 32-bits
-    
-    assert!(pipeline_reg.0.len() == 25);
+
+    if pipeline_reg.0.is_empty() {
+        //we got a nop instruction...nothing to do
+        return pipeline_reg.clone();
+    }
 
     let opcode = pipeline_reg.get_u8(0x0);
     let func3 = pipeline_reg.get_u8(0x1);
@@ -22,21 +28,27 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
     let mut rs2 = pipeline_reg.get_u32(0xF);
     let mut pc = pipeline_reg.get_u32(0x13);
 
-    let rs1_address = pipeline_reg.get_u8(0x17);    
+    let rs1_address = pipeline_reg.get_u8(0x17);
     let rs2_address = pipeline_reg.get_u8(0x18);
 
-    let commit_stage = rv32_core.stages[3].read().unwrap();
-    let commit_data = commit_stage.extract_data();
-    if !commit_data.0.is_empty() {
-        let commit_rd_address = commit_data.get_u8(0x2) & REG_MASK as u8;
-        let commit_rd = commit_data.get_u32(0x5); 
-        let commit_reg = commit_data.get_u8(0x0);
-        if commit_reg == 0x1 && commit_rd_address == rs1_address{
-            rs1 = commit_rd
-        }
-        if commit_reg == 0x1 && commit_rd_address == rs2_address{
-            rs2 = commit_rd
-        }
+    {
+        //Critical region where we wait for notify from WB
+        // wait for WB stage to get latest values for our registers
+        // TODO: maybe add a second 'snoop_cdb' function to the pipeline stage structure to move this logic
+        let wb_wire_data = &rv32_core.cdb[WB_STAGE];
+        let wb_data = wb_wire_data.get();
+
+            if !wb_data.0.is_empty() {
+                let wb_reg_write = wb_data.get_u8(0x0);
+                let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
+                let wb_rd_value = wb_data.get_u32(0x2);
+                if wb_reg_write == 0x1 && wb_rd_address == rs1_address {
+                    rs1 = wb_rd_value;
+                }
+                if wb_reg_write == 0x1 && wb_rd_address == rs2_address {
+                    rs2 = wb_rd_value;
+                }
+            }
     }
 
     let mut take_jump: u8 = 0u8;
@@ -105,53 +117,68 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
                 //andi
                 alu_out = rs1 & imm;
             }
-        },
+        }
         OP_JAL => {
             alu_out = pc + 4;
             pc = (pc as i32 + imm as i32) as RiscWord;
-            take_jump = 0x1; 
+            take_jump = 0x1;
         }
         OP_JALR => {
             alu_out = pc + 4;
             pc = ((rs1 as i32) + (imm as i32)) as RiscWord;
             take_jump = 0x1;
-        },
+        }
         OP_LOAD | OP_STORE => {
             alu_out = (rs1 as i32 + imm as i32) as RiscWord;
         }
         OP_BRANCH => {
             pc = (pc as i32 + imm as i32) as RiscWord;
-            if func3 == 0b000 { //beq
+            if func3 == 0b000 {
+                //beq
                 take_jump = (rs1 == rs2) as u8;
-            } else if func3 == 0b001 { //bne
+            } else if func3 == 0b001 {
+                //bne
                 take_jump = (rs1 != rs2) as u8;
-            } else if func3 == 0b100 { //blt
+            } else if func3 == 0b100 {
+                //blt
                 take_jump = ((rs1 as i32) < (rs2 as i32)) as u8;
-            } else if func3 == 0b101 { //bge
+            } else if func3 == 0b101 {
+                //bge
                 take_jump = ((rs1 as i32) >= (rs2 as i32)) as u8;
-            } else if func3 == 0b110 { //bltu
+            } else if func3 == 0b110 {
+                //bltu
                 take_jump = (rs1 < rs2) as u8;
-            } else if func3 == 0b111 { //bgeu
+            } else if func3 == 0b111 {
+                //bgeu
                 take_jump = (rs1 >= rs2) as u8;
             }
-        },
+        }
         OP_LUI => {
             alu_out = imm << 12;
-        },
+        }
         OP_AUIPC => {
             alu_out = (pc as i32 + (imm << 12) as i32) as RiscWord;
         }
         _ => {}
     }
 
+    {
+        let mut if_pipe = vec![];
+        if_pipe.push(branch_or_jump);
+        if_pipe.push(take_jump);
+        if_pipe.extend_from_slice(&pc.to_le_bytes());
+        let ex_data = PipelineData(if_pipe);
+        let ex_wire_data = &rv32_core.cdb[EX_STAGE];
+        ex_wire_data.put(ex_data);
+    }
+
     let mut pipeline_out = vec![];
     pipeline_out.push(reg_write);
     pipeline_out.push(mem_read_write);
     pipeline_out.push(rd_address);
-    pipeline_out.push(branch_or_jump);
-    pipeline_out.push(take_jump);
+    pipeline_out.push(func3);
     pipeline_out.extend_from_slice(&alu_out.to_le_bytes());
-    pipeline_out.extend_from_slice(&pc.to_le_bytes());
-
+    pipeline_out.extend_from_slice(&rs2.to_le_bytes());
+    
     PipelineData(pipeline_out)
 }

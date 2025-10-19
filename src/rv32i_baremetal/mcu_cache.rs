@@ -98,8 +98,10 @@ impl MemoryDevice for MCUCache {
         let cache_response = self.load_data(request.data_address);
         let byte_index = (request.data_address - self.start_address) % self.line_size as u64; 
         let mut data = vec![0u8; request.data_size as usize];
-        for i in 0..request.data_size as usize{
-            data[i] = cache_response.cache_line[byte_index as usize + i];
+        if cache_response.status == MemoryResponseType::CacheHit { 
+            for i in 0..request.data_size as usize{
+                data[i] = cache_response.cache_line[byte_index as usize + i];
+            }
         }
         MemoryResponse { data, status: cache_response.status }
     }

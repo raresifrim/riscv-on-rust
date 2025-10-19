@@ -50,6 +50,7 @@ pub struct MemoryRequest {
 }
 
 /// TODO: add methods for converting byte array back to u8/u16/u32 etc for processor
+#[derive(Debug)]
 pub struct MemoryResponse {
     pub data: Vec<u8>,
     pub status: MemoryResponseType

@@ -1,6 +1,10 @@
 use crossbeam_channel::bounded;
 use crate::{risc_soc::{cache::Cache, memory_management_unit::{Address, MemoryDevice, MemoryDeviceType}, pipeline_stage::{PipelineStage, PipelineStageInterface}, risc_soc::RiscCore}, rv32i_baremetal::{commit, decode, execute, fetch, mcu_cache::MCUCache, uart::UART}};
 
+pub const IF_STAGE: usize = 0x0;
+pub const ID_STAGE: usize = 0x1;
+pub const EX_STAGE: usize = 0x2;
+pub const WB_STAGE: usize = 0x3;
 
 pub fn init_core() -> RiscCore {
     let mut rv32i_core = RiscCore::new(4, 1000); //1us clock period
@@ -10,13 +14,13 @@ pub fn init_core() -> RiscCore {
     rv32i_core.add_l1_cache(Box::new(icache), Box::new(dcache));
     
     // add stages and connections between them
-    let (if_id_sender, if_id_receiver) = bounded(0);
-    let (id_ex_sender, id_ex_receiver) = bounded(0);
-    let (ex_wb_sender, ex_wb_receiver) = bounded(0);
-    let if_stage = PipelineStage::new("IF".to_string(), fetch::rv32_mcu_fetch_stage, None, Some(if_id_sender));
-    let id_stage = PipelineStage::new("ID".to_string(), decode::rv32_mcu_decode_stage, Some(if_id_receiver), Some(id_ex_sender));
-    let ex_stage= PipelineStage::new("EX".to_string(), execute::rv32_mcu_execute_stage, Some(id_ex_receiver), Some(ex_wb_sender));
-    let wb_stage= PipelineStage::new("WB".to_string(), commit::rv32_mcu_commit_stage, Some(ex_wb_receiver), None);
+    let (if_id_sender, if_id_receiver) = bounded(1);
+    let (id_ex_sender, id_ex_receiver) = bounded(1);
+    let (ex_wb_sender, ex_wb_receiver) = bounded(1);
+    let if_stage = PipelineStage::new("IF".to_string(), IF_STAGE, fetch::rv32_mcu_fetch_stage, None, Some(if_id_sender));
+    let id_stage = PipelineStage::new("ID".to_string(), ID_STAGE,  decode::rv32_mcu_decode_stage, Some(if_id_receiver), Some(id_ex_sender));
+    let ex_stage= PipelineStage::new("EX".to_string(), EX_STAGE,  execute::rv32_mcu_execute_stage, Some(id_ex_receiver), Some(ex_wb_sender));
+    let wb_stage= PipelineStage::new("WB".to_string(), WB_STAGE,  commit::rv32_mcu_commit_stage, Some(ex_wb_receiver), None);
     rv32i_core.add_stage(if_stage);
     rv32i_core.add_stage(id_stage);
     rv32i_core.add_stage(ex_stage);
