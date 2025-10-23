@@ -21,9 +21,10 @@ pub fn rv32_mcu_fetch_stage(_pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
     instruction.extend_from_slice(&current_pc.to_le_bytes());
 
     {
+        println!("IF: waiting for ex to forward me some data");
         // Comb logic coming from EX stage
         let ex_wire_data = &rv32_core.cdb[EX_STAGE];
-        let ex_data = ex_wire_data.get();
+        let ex_data = ex_wire_data.read();
 
         if !ex_data.is_empty() {
             let ex_branch_or_jump = ex_data.get_u8(0x0);
@@ -41,7 +42,7 @@ pub fn rv32_mcu_fetch_stage(_pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
                     data: None,
                 };
                 let response = rv32_core.icache_request(request);
-                let mut instruction = response.data;
+                instruction = response.data; //overwrite instr with new value
                 instruction.extend_from_slice(&current_pc.to_le_bytes());
             }
         }

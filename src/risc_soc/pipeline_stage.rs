@@ -1,10 +1,16 @@
 use crate::risc_soc::risc_soc::RiscCore;
 use crossbeam_channel::{Receiver, Sender};
-use std::ops::{Deref, DerefMut};
-#[derive(Debug, Default)]
+use std::{ops::{Deref, DerefMut}, sync::Barrier};
 
-#[derive(Clone)]
+
+#[derive(Debug, Clone)]
 pub struct PipelineData(pub Vec<u8>);
+
+impl Default for PipelineData{
+    fn default() -> Self {
+        Self(vec![])
+    }
+}
 
 impl PipelineData {
 
@@ -53,7 +59,6 @@ pub type ClockCycle = u64;
 
 #[derive(Debug, Default)]
 pub struct PipelinePayload {
-    pub clock_cycle: ClockCycle,
     pub instruction: Instruction,
     pub data: PipelineData,
 }
@@ -74,6 +79,7 @@ pub struct PipelineStage {
     pub output_channel: Option<Sender<PipelinePayload>>,
     /// function that runs inside the pipeline stage and produces data for the next stage
     pub process_fn: fn(&PipelineData, &RiscCore) -> PipelineData,
+    pub debug: bool,
 }
 
 pub trait PipelineStageInterface {
@@ -82,21 +88,21 @@ pub trait PipelineStageInterface {
     fn new(
         name: String,
         index: usize,
+        size: usize,
         process_fn: Self::F,
         input_channel: Option<Receiver<PipelinePayload>>,
         output_channel: Option<Sender<PipelinePayload>>,
     ) -> Self;
 
-    /// spawn thread that will run this stage
-    /// you must pass a function that will process the input data into this stage
-    /// and produce new data for the putput of this stage
-    //fn run(self, core: Arc<RwLock<RiscCore>>) -> std::thread::JoinHandle<()>;
+    fn execute_once(&self, data: &PipelineData, core: &RiscCore, barrier: &Barrier) -> PipelineData;
 
     /// extract data from current moment
     fn extract_data(&self) -> &PipelineData;
 
     /// check the current instruction and clock cycle of this pipeline stage
     fn get_current_step(&self) -> (ClockCycle, Instruction);
+
+    fn enable_debug(&mut self, debug: bool);
 }
 
 impl PipelineStageInterface for PipelineStage {
@@ -105,6 +111,7 @@ impl PipelineStageInterface for PipelineStage {
     fn new(
         name: String,
         index: usize,
+        size: usize,
         process_fn: Self::F,
         input_channel: Option<Receiver<PipelinePayload>>,
         output_channel: Option<Sender<PipelinePayload>>,
@@ -113,11 +120,12 @@ impl PipelineStageInterface for PipelineStage {
             name,
             index,
             process_fn,
+            debug: false,
             instruction: Instruction(0x0),
             clock_cycle: 0,
             input_channel,
             output_channel,
-            data: PipelineData(vec![]),
+            data: PipelineData(vec![0u8; size]),
         }
     }
 
@@ -127,6 +135,17 @@ impl PipelineStageInterface for PipelineStage {
 
     fn get_current_step(&self) -> (ClockCycle, Instruction) {
         (self.clock_cycle, self.instruction)
+    }
+
+    fn execute_once(&self, data: &PipelineData, core: &RiscCore, barrier: &Barrier) -> PipelineData {
+        barrier.wait(); //clock boundary
+        let pipe_reg = (self.process_fn)(data, core); //actual pipeline 
+        barrier.wait(); //clock boundary
+        return  pipe_reg;
+    }
+
+    fn enable_debug(&mut self, debug: bool) {
+        self.debug = debug
     }
 }
 

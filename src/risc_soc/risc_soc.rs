@@ -4,9 +4,10 @@ use crate::risc_soc::memory_management_unit::{
     Address, MemoryDeviceType, MemoryManagementUnit, MemoryRequest,
     MemoryResponse, MemoryResponseType,
 };
-use crate::risc_soc::wire::WireData;
+use crate::risc_soc::wire::Wire;
 use object::read::elf::{FileHeader, SectionHeader};
 use object::{Endianness, elf};
+use tracing_subscriber::field::debug;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Read;
@@ -28,18 +29,19 @@ pub enum WordSize {
 }
 
 pub struct RiscCore {
+    pub debug: bool,
     pub stages: Vec<Arc<Mutex<PipelineStage>>>,
     pub icache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub dcache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub registers: Registers,
     pub program_counter: AtomicU64,
     pub mmu: Arc<RwLock<MemoryManagementUnit>>,
-    pub clock_period: u128, //nanoseconds
-    pub cdb: Vec<WireData>
+    pub clock_period: Option<u128>, //nanoseconds
+    pub cdb: Vec<Wire>
 }
 
 impl RiscCore {
-    pub fn new(num_stages: usize, clock_period: u128) -> Self {
+    pub fn new(num_stages: usize, clock_period: Option<u128>, debug: bool) -> Self {
         // create an empty array of stages
         let stages = Vec::with_capacity(num_stages);
         let cdb = Vec::with_capacity(num_stages);
@@ -52,6 +54,14 @@ impl RiscCore {
             mmu: Arc::new(RwLock::new(MemoryManagementUnit::default())),
             cdb,
             clock_period,
+            debug
+        }
+    }
+
+    pub fn enable_debug(&mut self, debug: bool){
+        self.debug = debug;
+        for cdb_lane in &mut self.cdb {
+            cdb_lane.enable_debug(debug);
         }
     }
 
@@ -70,7 +80,7 @@ impl RiscCore {
     }
 
     pub fn set_clock_period(&mut self, nanosecs: u128) {
-        self.clock_period = nanosecs;
+        self.clock_period = Some(nanosecs);
     }
 
     pub fn icache_request(&self, request: MemoryRequest) -> MemoryResponse {
@@ -111,12 +121,13 @@ impl RiscCore {
 
     /// dynamically add stages to the processor creating a custom pipeline
     /// stages should be created before hand and passed here already initialized
-    pub fn add_stage(&mut self, stage: PipelineStage) -> &mut Self {
+    pub fn add_stage(&mut self, mut stage: PipelineStage) -> &mut Self {
         if self.stages.len() + 1 > self.stages.capacity() {
             panic!("Trying to add more stages then configured for current core!");
         }
+        stage.enable_debug(self.debug);
         self.stages.push(Arc::new(Mutex::new(stage)));
-        self.cdb.push(WireData::new(self.clock_period as u64));
+        self.cdb.push(Wire::new(self.clock_period, self.debug));
         self
     }
 
@@ -212,31 +223,53 @@ impl RiscCore {
         use crate::risc_soc::instruction_asm::rv32_asm;
         if disassmble {
             let asm_instr = rv32_asm(instr_bin);
-            tracing::info!(
-                "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
-                stage.name,
-                stage.clock_cycle,
-                asm_instr,
-                stage.instruction.0
-            );
+            if self.debug {
+                println!(
+                    "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
+                    stage.name,
+                    stage.clock_cycle,
+                    asm_instr,
+                    stage.instruction.0
+                );  
+            } else {
+                tracing::info!(
+                    "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
+                    stage.name,
+                    stage.clock_cycle,
+                    asm_instr,
+                    stage.instruction.0
+                );
+            }
         } else {
-            tracing::info!(
-                "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
-                stage.name,
-                stage.clock_cycle,
-                stage.instruction.0
-            );
+            if self.debug {
+                println!(
+                    "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
+                    stage.name,
+                    stage.clock_cycle,
+                    stage.instruction.0
+                );  
+            } else {
+                tracing::info!(
+                    "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
+                    stage.name,
+                    stage.clock_cycle,
+                    stage.instruction.0
+                );
+            }
         }
     }
 
     /// start execution of loaded program
+    /// if running in debug mode it will run a single instruction through all pipeline stages and the run function must be called for each new instruction
     pub fn run(&mut self) {
         //start execution of all stages
         use std::thread::sleep;
         use std::time::Instant;
+        use std::sync::Barrier;
 
+        let barrier = Barrier::new(self.stages.len());
         std::thread::scope(|s| {
-            
+                        
             for arc_stage in &self.stages {
                 s.spawn(|| {
                     let clock_period = self.clock_period;
@@ -245,94 +278,65 @@ impl RiscCore {
                         
                         let pipeline_payload;
                         // read from previous pipeline stage if available
-                        match stage.input_channel {
-                            Some(ref pipeline_input) => match pipeline_input.recv() {
+                        if stage.input_channel.is_some() {
+                            match stage.input_channel.as_ref().unwrap().try_recv() {
                                 Ok(data_input) => {
+                                    println!("Stage {} received pipeline data", stage.name);
                                     stage.instruction = data_input.instruction;
                                     stage.data = data_input.data;
-                                    stage.clock_cycle = data_input.clock_cycle;
+                                },
 
-                                    // clear combinational logic noise before creating a new one
-                                    self.cdb[stage.index].clear();
-                                        
-                                    let period_start = Instant::now();
-
-                                    let data_output = (stage.process_fn)(&stage.data, self);
-                                    
-                                    let elapsed_period = period_start.elapsed();
-                                    let period = elapsed_period.as_nanos();
-                                    if period < clock_period {
-                                        //complete remainder of clock period
-                                        sleep(std::time::Duration::from_nanos((clock_period - period) as u64));
-                                    } else {
-                                        // otherwise treat it as a warning
-                                        tracing::warn!(
-                                            "Pipeline stage {} execution time is taking longer then the configured clock period by {} nanosecs.",
-                                            stage.name, 
-                                            period - clock_period
-                                        );
-                                    }
-
-                                    let mut instr_bin = stage.instruction.0;
-                                    if data_output.0.is_empty() {
-                                        instr_bin = 0x13; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
-                                    }
-
-                                    self.trace_asm_instr(instr_bin, &stage, true);
-
-                                    pipeline_payload = PipelinePayload {
-                                        instruction: stage.instruction,
-                                        clock_cycle: data_input.clock_cycle + 1,
-                                        data: data_output,
-                                    };
-                                }
                                 Err(e) => {
-                                    tracing::info!("{e}");
-                                    continue;
+                                    match e {
+                                        crossbeam_channel::TryRecvError::Empty => {},
+                                        crossbeam_channel::TryRecvError::Disconnected => {
+                                            panic!("No preceding pipeline stage found anymore!")
+                                        }
+                                    }
+                                    
                                 }
-                            },
-
-                            None => { // if there is no input channel, this would mean we are in the fetch stage
-
-                                // clear current combinational logic noise before creating a new one
-                                self.cdb[stage.index].clear(); 
-                                
-                                let period_start = Instant::now();
-
-                                let data_output = (stage.process_fn)(&stage.data, self);
-                                
-                                let elapsed_period = period_start.elapsed();
-                                let period = elapsed_period.as_nanos();
-                                if period < clock_period {
-                                //complete remainder of clock period
-                                    sleep(std::time::Duration::from_nanos((clock_period - period) as u64));
-                                } else {
-                                    // otherwise treat it as a warning
-                                    tracing::warn!(
-                                        "Pipeline stage {} execution time is taking longer then the configured clock period by {} nanosecs.",
-                                        stage.name, 
-                                        period - clock_period
-                                    );
-                                }
-                                
-                                stage.instruction = Instruction(data_output.get_u32(0x0));
-                        
-                                let mut instr_bin = stage.instruction.0;
-                                if data_output.0.is_empty() {
-                                    instr_bin = 0x13; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
-                                }
-
-                                self.trace_asm_instr(instr_bin, &stage, true);
-
-                                stage.clock_cycle = stage.clock_cycle + 1;
-                                pipeline_payload = PipelinePayload {
-                                    instruction: stage.instruction,
-                                    clock_cycle: stage.clock_cycle,
-                                    data: data_output,
-                                };
                             }
                         };
+    
+                        let period_start = Instant::now();
 
+                        let data_output =  stage.execute_once(&stage.data, self, &barrier);
+                                    
+                        let elapsed_period = period_start.elapsed();
+                        let period = elapsed_period.as_nanos();
+                        tracing::info!("Stage {} delay time: {} ns", stage.name, period);
+
+                        if clock_period.is_some() {
+                            let clock_period = clock_period.unwrap();
+                            if period < clock_period {
+                                //complete remainder of clock period
+                                sleep(std::time::Duration::from_nanos((clock_period - period) as u64));
+                            } else {
+                                // otherwise treat it as a warning
+                                tracing::warn!(
+                                    "Pipeline stage {} execution time is taking longer then the configured clock period by {} nanosecs.",
+                                    stage.name, 
+                                    period - clock_period
+                                );
+                            }
+                        }
+                        
+                        let mut instr_bin = stage.instruction.0;
+                        if stage.input_channel.is_none() {
+                            instr_bin = data_output.get_u32(0x0);
+                            stage.instruction = Instruction(instr_bin);
+                        }
+                        if data_output.0.is_empty() {
+                            instr_bin = 0x0; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
+                        }
+
+                        self.trace_asm_instr(instr_bin, &stage, true);
+
+                        pipeline_payload = PipelinePayload {
+                            instruction: stage.instruction,
+                            data: data_output,
+                        };
+                                
                         //send to next pipeline stage if available
                         match stage.output_channel {
                             Some(ref pipline_output) => match pipline_output.send(pipeline_payload) {
@@ -344,11 +348,19 @@ impl RiscCore {
                             },
                             None => {}
                         }
+
+                        stage.clock_cycle += 1;
+
+                        if self.debug {
+                            break;
+                        }
+
                     }
                 });
             }
         });
     }
+
 }
 
 impl Deref for RiscCore {

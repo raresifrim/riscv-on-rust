@@ -8,13 +8,7 @@ use crate::rv32i_baremetal::decode::{
 use std::u32;
 
 pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) -> PipelineData {
-    // we are expecting to get an instruction and the the program counter, both being 32-bits
-
-    if pipeline_reg.0.is_empty() {
-        //we got a nop instruction...nothing to do
-        return pipeline_reg.clone();
-    }
-
+    
     let opcode = pipeline_reg.get_u8(0x0);
     let func3 = pipeline_reg.get_u8(0x1);
     let func7 = pipeline_reg.get_u8(0x2);
@@ -34,9 +28,8 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
     {
         //Critical region where we wait for notify from WB
         // wait for WB stage to get latest values for our registers
-        // TODO: maybe add a second 'snoop_cdb' function to the pipeline stage structure to move this logic
         let wb_wire_data = &rv32_core.cdb[WB_STAGE];
-        let wb_data = wb_wire_data.get();
+        let wb_data = wb_wire_data.read();
 
             if !wb_data.0.is_empty() {
                 let wb_reg_write = wb_data.get_u8(0x0);
@@ -169,7 +162,8 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
         if_pipe.extend_from_slice(&pc.to_le_bytes());
         let ex_data = PipelineData(if_pipe);
         let ex_wire_data = &rv32_core.cdb[EX_STAGE];
-        ex_wire_data.put(ex_data);
+        ex_wire_data.assign(ex_data);
+        println!("EX: data forwarded to cdb");
     }
 
     let mut pipeline_out = vec![];

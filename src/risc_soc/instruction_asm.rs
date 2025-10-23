@@ -1,6 +1,9 @@
 use instruction_decoder::Decoder;
 
 pub fn rv32_asm(instr_bin: u32) -> String {
+    if instr_bin == 0x0 {
+        return "nop".to_string();
+    }
     match Decoder::new(&[include_str!("../../instruction-decoder/toml/RV32I.toml").to_string()]) {
         Ok(test_decoder) => {
             if let Ok(iform) = test_decoder.decode_from_u32(instr_bin, 32) {

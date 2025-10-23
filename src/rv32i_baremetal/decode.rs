@@ -31,13 +31,12 @@ pub const OP_FENCE: u8 = 0b0001111; // Fence
 pub const OP_SYSTEM: u8 = 0b1110011; // System Instructions (ECALL, EBREAK, etc.)
 
 pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) -> PipelineData {
-    // we are expecting to get an instruction and the the program counter, both being 32-bits
-    assert!(pipeline_reg.0.len() == 8);
-
+   
     {
+        println!("ID: waiting fot ex to forward me some data"); 
         // wait for EX stage to see if there was a jump/branch and if we should flush the current instruction
         let ex_wire_data = &rv32_core.cdb[EX_STAGE];
-        let ex_data = ex_wire_data.get();
+        let ex_data = ex_wire_data.read();
         if !ex_data.0.is_empty() {
             let ex_branch_or_jump = ex_data.get_u8(0x0);
             let ex_take_jump = ex_data.get_u8(0x1);
@@ -99,16 +98,18 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
         }
         OP_AUIPC | OP_LUI => instruction & 0xFFF,
         OP_ALU => 0u32,
+        0x0 => 0u32,
         _ => panic!("Cannot decode this type of opcode: {opcode}"), //this MCU cannot execute SYSTEM/FENCE instr
     };
 
     //leave read of regs at the end
     //first check commit stage(4th in our case) and see if there is a register to commit first as it might be needed for one of the rs
     {
+        println!("ID: waiting fot wb to forward me some data");
         // wait for WB stage to get latest values for our registers
         let wb_wire_data = &rv32_core.cdb[WB_STAGE];
-        let wb_data = wb_wire_data.get();
-
+        let wb_data = wb_wire_data.read();
+        println!("wb_data = {:?}", wb_data);
         if !wb_data.0.is_empty() {
             let wb_reg_write = wb_data.get_u8(0x0);
             let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
