@@ -67,6 +67,7 @@ pub struct PipelineStage {
     /// name identifier and index for the pipeline stage
     pub name: String,
     pub index: usize,
+    pub size: usize,
     /// current clock_cycle and instruction in this stage
     pub instruction: Instruction,
     pub clock_cycle: ClockCycle,
@@ -119,6 +120,7 @@ impl PipelineStageInterface for PipelineStage {
         Self {
             name,
             index,
+            size,
             process_fn,
             debug: false,
             instruction: Instruction(0x0),
@@ -138,6 +140,7 @@ impl PipelineStageInterface for PipelineStage {
     }
 
     fn execute_once(&self, data: &PipelineData, core: &RiscCore, barrier: &Barrier) -> PipelineData {
+        core.cdb[self.index].clear(); //clear wires before new clock edge
         barrier.wait(); //clock boundary
         let pipe_reg = (self.process_fn)(data, core); //actual pipeline 
         barrier.wait(); //clock boundary

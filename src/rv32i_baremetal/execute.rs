@@ -8,7 +8,6 @@ use crate::rv32i_baremetal::decode::{
 use std::u32;
 
 pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) -> PipelineData {
-    
     let opcode = pipeline_reg.get_u8(0x0);
     let func3 = pipeline_reg.get_u8(0x1);
     let func7 = pipeline_reg.get_u8(0x2);
@@ -25,23 +24,21 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
     let rs1_address = pipeline_reg.get_u8(0x17);
     let rs2_address = pipeline_reg.get_u8(0x18);
 
-    {
-        //Critical region where we wait for notify from WB
-        // wait for WB stage to get latest values for our registers
-        let wb_wire_data = &rv32_core.cdb[WB_STAGE];
-        let wb_data = wb_wire_data.read();
+    //Critical region where we wait for notify from WB
+    // wait for WB stage to get latest values for our registers
+    let wb_wire_data = &rv32_core.cdb[WB_STAGE];
+    let wb_data = wb_wire_data.read();
 
-            if !wb_data.0.is_empty() {
-                let wb_reg_write = wb_data.get_u8(0x0);
-                let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
-                let wb_rd_value = wb_data.get_u32(0x2);
-                if wb_reg_write == 0x1 && wb_rd_address == rs1_address {
-                    rs1 = wb_rd_value;
-                }
-                if wb_reg_write == 0x1 && wb_rd_address == rs2_address {
-                    rs2 = wb_rd_value;
-                }
-            }
+    if !wb_data.0.is_empty() {
+        let wb_reg_write = wb_data.get_u8(0x0);
+        let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
+        let wb_rd_value = wb_data.get_u32(0x2);
+        if wb_reg_write == 0x1 && wb_rd_address == rs1_address {
+            rs1 = wb_rd_value;
+        }
+        if wb_reg_write == 0x1 && wb_rd_address == rs2_address {
+            rs2 = wb_rd_value;
+        }
     }
 
     let mut take_jump: u8 = 0u8;
@@ -155,16 +152,14 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
         _ => {}
     }
 
-    {
-        let mut if_pipe = vec![];
-        if_pipe.push(branch_or_jump);
-        if_pipe.push(take_jump);
-        if_pipe.extend_from_slice(&pc.to_le_bytes());
-        let ex_data = PipelineData(if_pipe);
-        let ex_wire_data = &rv32_core.cdb[EX_STAGE];
-        ex_wire_data.assign(ex_data);
-        println!("EX: data forwarded to cdb");
-    }
+    //send info about branch to IF
+    let mut if_pipe = vec![];
+    if_pipe.push(branch_or_jump);
+    if_pipe.push(take_jump);
+    if_pipe.extend_from_slice(&pc.to_le_bytes());
+    let ex_data = PipelineData(if_pipe);
+    let ex_wire_data = &rv32_core.cdb[EX_STAGE];
+    ex_wire_data.assign(ex_data);
 
     let mut pipeline_out = vec![];
     pipeline_out.push(reg_write);
@@ -173,6 +168,6 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
     pipeline_out.push(func3);
     pipeline_out.extend_from_slice(&alu_out.to_le_bytes());
     pipeline_out.extend_from_slice(&rs2.to_le_bytes());
-    
+
     PipelineData(pipeline_out)
 }

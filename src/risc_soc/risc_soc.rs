@@ -7,13 +7,12 @@ use crate::risc_soc::memory_management_unit::{
 use crate::risc_soc::wire::Wire;
 use object::read::elf::{FileHeader, SectionHeader};
 use object::{Endianness, elf};
-use tracing_subscriber::field::debug;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// type used to represent data inside the RiscCore (defaulted to u32 for RV32)
 /// can be overwritten to u64 if RV64 is intended for implementation
@@ -31,6 +30,7 @@ pub enum WordSize {
 pub struct RiscCore {
     pub debug: bool,
     pub stages: Vec<Arc<Mutex<PipelineStage>>>,
+    pub pipeline_reg_width: Vec<usize>,
     pub icache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub dcache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub registers: Registers,
@@ -49,6 +49,7 @@ impl RiscCore {
             stages,
             icache: None,
             dcache: None,
+            pipeline_reg_width: vec![0usize; num_stages],
             registers: Registers::default(),
             program_counter: AtomicU64::new(0x8000_0000),
             mmu: Arc::new(RwLock::new(MemoryManagementUnit::default())),
@@ -62,6 +63,10 @@ impl RiscCore {
         self.debug = debug;
         for cdb_lane in &mut self.cdb {
             cdb_lane.enable_debug(debug);
+        }
+        for pipeline_stage in &self.stages{
+            let mut lock = pipeline_stage.lock().unwrap();
+            lock.enable_debug(debug);
         }
     }
 
@@ -125,6 +130,7 @@ impl RiscCore {
         if self.stages.len() + 1 > self.stages.capacity() {
             panic!("Trying to add more stages then configured for current core!");
         }
+        self.pipeline_reg_width[self.stages.len()] = stage.size;
         stage.enable_debug(self.debug);
         self.stages.push(Arc::new(Mutex::new(stage)));
         self.cdb.push(Wire::new(self.clock_period, self.debug));
@@ -281,7 +287,6 @@ impl RiscCore {
                         if stage.input_channel.is_some() {
                             match stage.input_channel.as_ref().unwrap().try_recv() {
                                 Ok(data_input) => {
-                                    println!("Stage {} received pipeline data", stage.name);
                                     stage.instruction = data_input.instruction;
                                     stage.data = data_input.data;
                                 },
@@ -300,7 +305,8 @@ impl RiscCore {
     
                         let period_start = Instant::now();
 
-                        let data_output =  stage.execute_once(&stage.data, self, &barrier);
+                        let data_input = if stage.data.is_empty() { &PipelineData(vec![0u8; self.pipeline_reg_width[stage.index]]) } else { &stage.data };
+                        let mut data_output =  stage.execute_once(data_input, self, &barrier);
                                     
                         let elapsed_period = period_start.elapsed();
                         let period = elapsed_period.as_nanos();
@@ -326,7 +332,11 @@ impl RiscCore {
                             instr_bin = data_output.get_u32(0x0);
                             stage.instruction = Instruction(instr_bin);
                         }
-                        if data_output.0.is_empty() {
+                        else if stage.data.is_empty() {
+                            instr_bin = 0x0; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
+                            data_output = PipelineData(vec![]); //we should also send nothing further 
+                        }
+                        else if data_output.0.is_empty() {
                             instr_bin = 0x0; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
                         }
 
@@ -396,4 +406,14 @@ impl Registers {
             self.0[rd_address].store(rd as u64, std::sync::atomic::Ordering::SeqCst);
         }
     }
+}
+
+use std::fmt::Display;
+impl Display for Registers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for i in 0..self.0.len() {
+            write!(f, "x{i}={:?}\n", (self.0[i].load(std::sync::atomic::Ordering::SeqCst) as RiscWord).cast_signed())?;
+        }
+        Ok(())
+    }    
 }

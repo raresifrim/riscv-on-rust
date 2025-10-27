@@ -50,14 +50,21 @@ mod tests {
         let mut rv32i_core = super::init_core(None);
         rv32i_core.enable_debug(true);
         super::load_elf(&mut rv32i_core, "./isa_tests/add.elf");
-        rv32i_core.run();
-        rv32i_core.run();
-        rv32i_core.run();
-        rv32i_core.run();
-        rv32i_core.run();
-        rv32i_core.run();
-        println!("{:?}", rv32i_core.registers);
-        
+        for _i in 0..11{
+            rv32i_core.run();
+        }
+        println!("{}", rv32i_core.registers);
+    }
+
+    #[test]
+    fn test_branch() {
+        let mut rv32i_core = super::init_core(None);
+        rv32i_core.enable_debug(true);
+        super::load_elf(&mut rv32i_core, "./isa_tests/branch.elf");
+        for _i in 0..15{
+            rv32i_core.run();
+        }
+        println!("{}", rv32i_core.registers);
     }
 
 }

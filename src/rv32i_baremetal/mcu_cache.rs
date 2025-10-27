@@ -1,6 +1,4 @@
-use std::ptr::null;
-
-use crate::risc_soc::memory_management_unit::{MemoryManagementUnit, MemoryResponseType};
+use crate::risc_soc::memory_management_unit::{MemoryResponseType};
 use crate::risc_soc::{
     memory_management_unit::{
         Address, MemoryDevice, MemoryDeviceType, MemoryRequest,
