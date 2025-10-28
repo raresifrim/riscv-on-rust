@@ -69,8 +69,10 @@ impl MemoryDevice for MCUCache {
 
     #[inline]
     fn send_data_request(&mut self, request: MemoryRequest) -> MemoryResponse {
+
+        let response;
         if request.request_type == MemoryRequestType::READ {
-            self.read_request(request)
+            response = self.read_request(request);
         } else {
             let data = match request.data {
                 Some(mut d) => {
@@ -87,11 +89,12 @@ impl MemoryDevice for MCUCache {
                 }
             };
             let cache_response = self.store_data(request.data_address, data);
-            MemoryResponse{
+            response = MemoryResponse{
                 data: vec![],
                 status: cache_response.status
             }
         }
+        return response;
     }
 
     //read only request available to not lock core for write
@@ -120,7 +123,7 @@ impl MemoryDevice for MCUCache {
 
     fn debug(&self, start_address: Address, end_address: Address) -> std::fmt::Result {
         assert!(start_address >= self.start_address && end_address <= self.end_address);
-        println!("Memory {:?}: {{", self.memory_type);
+        println!("\nMemory {:?}: {{", self.memory_type);
         let num_words = end_address - start_address;
         let num_lines = num_words / self.line_size as u64;
         for i in 0..=num_lines {

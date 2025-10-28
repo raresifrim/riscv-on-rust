@@ -35,7 +35,6 @@ impl Wire {
         let (lock, cvar) = &*pair;
         let mut wire = lock.lock().unwrap();
         *wire = None;
-        cvar.notify_all();
     }
 
     pub fn assign(&self, data: PipelineData) {

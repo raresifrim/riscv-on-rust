@@ -95,8 +95,6 @@ pub trait PipelineStageInterface {
         output_channel: Option<Sender<PipelinePayload>>,
     ) -> Self;
 
-    fn execute_once(&self, data: &PipelineData, core: &RiscCore, barrier: &Barrier) -> PipelineData;
-
     /// extract data from current moment
     fn extract_data(&self) -> &PipelineData;
 
@@ -139,13 +137,6 @@ impl PipelineStageInterface for PipelineStage {
         (self.clock_cycle, self.instruction)
     }
 
-    fn execute_once(&self, data: &PipelineData, core: &RiscCore, barrier: &Barrier) -> PipelineData {
-        core.cdb[self.index].clear(); //clear wires before new clock edge
-        barrier.wait(); //clock boundary
-        let pipe_reg = (self.process_fn)(data, core); //actual pipeline 
-        barrier.wait(); //clock boundary
-        return  pipe_reg;
-    }
 
     fn enable_debug(&mut self, debug: bool) {
         self.debug = debug

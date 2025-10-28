@@ -267,7 +267,7 @@ impl RiscCore {
 
     /// start execution of loaded program
     /// if running in debug mode it will run a single instruction through all pipeline stages and the run function must be called for each new instruction
-    pub fn run(&mut self) {
+    pub fn run(&mut self, clock_cycles: Option<u64>) {
         //start execution of all stages
         use std::thread::sleep;
         use std::time::Instant;
@@ -282,7 +282,10 @@ impl RiscCore {
                     let mut stage = arc_stage.lock().unwrap();
                     loop {
                         
+                        self.cdb[stage.index].clear(); //clear wires before new clock edge so that we can react to a change
+                        barrier.wait(); //clock boundary
                         let pipeline_payload;
+                        
                         // read from previous pipeline stage if available
                         if stage.input_channel.is_some() {
                             match stage.input_channel.as_ref().unwrap().try_recv() {
@@ -306,7 +309,7 @@ impl RiscCore {
                         let period_start = Instant::now();
 
                         let data_input = if stage.data.is_empty() { &PipelineData(vec![0u8; self.pipeline_reg_width[stage.index]]) } else { &stage.data };
-                        let mut data_output =  stage.execute_once(data_input, self, &barrier);
+                        let mut data_output =  (stage.process_fn)(data_input, self);
                                     
                         let elapsed_period = period_start.elapsed();
                         let period = elapsed_period.as_nanos();
@@ -346,6 +349,10 @@ impl RiscCore {
                             instruction: stage.instruction,
                             data: data_output,
                         };
+
+                        if clock_cycles.is_some() && stage.clock_cycle == clock_cycles.unwrap() {
+                            break;
+                        }
                                 
                         //send to next pipeline stage if available
                         match stage.output_channel {
@@ -358,9 +365,10 @@ impl RiscCore {
                             },
                             None => {}
                         }
-
+                        
+                        barrier.wait(); //clock boundary
                         stage.clock_cycle += 1;
-
+                        
                         if self.debug {
                             break;
                         }

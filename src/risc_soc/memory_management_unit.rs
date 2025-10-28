@@ -41,7 +41,7 @@ pub enum MemoryDeviceType {
 }
 
 /// TODO: add methods for converting u8/u16/u32 etc to data vec for memory request
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 pub struct MemoryRequest {
     pub request_type: MemoryRequestType,
     pub data_address: Address,

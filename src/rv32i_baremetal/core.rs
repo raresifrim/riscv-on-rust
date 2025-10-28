@@ -44,14 +44,14 @@ pub fn load_elf(core: &mut RiscCore, path: &str) {
 
 #[cfg(test)]
 mod tests {
-    
+    // TODO: refactor tests to properly check results in registers/memory
      #[test]
     fn test_add() {
         let mut rv32i_core = super::init_core(None);
         rv32i_core.enable_debug(true);
         super::load_elf(&mut rv32i_core, "./isa_tests/add.elf");
         for _i in 0..11{
-            rv32i_core.run();
+            rv32i_core.run(None);
         }
         println!("{}", rv32i_core.registers);
     }
@@ -62,7 +62,7 @@ mod tests {
         rv32i_core.enable_debug(true);
         super::load_elf(&mut rv32i_core, "./isa_tests/branch.elf");
         for _i in 0..15{
-            rv32i_core.run();
+            rv32i_core.run(None);
         }
         println!("{}", rv32i_core.registers);
     }
@@ -73,7 +73,7 @@ mod tests {
         rv32i_core.enable_debug(true);
         super::load_elf(&mut rv32i_core, "./isa_tests/jump_and_return.elf");
         for _i in 0..15{
-            rv32i_core.run();
+            rv32i_core.run(None);
         }
         println!("{}", rv32i_core.registers);
     }
@@ -81,11 +81,8 @@ mod tests {
     #[test]
     fn test_memory() {
         let mut rv32i_core = super::init_core(None);
-        rv32i_core.enable_debug(true);
         super::load_elf(&mut rv32i_core, "./isa_tests/memory.elf");
-        for _i in 0..48{
-            rv32i_core.run();
-        }
+        rv32i_core.run(Some(48));
         rv32i_core.dcache.unwrap().read().unwrap().debug(0x8001_0000, 0x8001_0010).unwrap();
     }
 }
