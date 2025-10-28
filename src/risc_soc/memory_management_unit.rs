@@ -82,7 +82,7 @@ pub trait MemoryDevice {
     fn init_mem(&mut self, address: Address, data: &[u8]);
 
     /// helper function to debug various aspects of the memory
-    fn debug(&self) -> std::fmt::Result;
+    fn debug(&self, start_address: Address, end_address: Address) -> std::fmt::Result;
 
 }
 

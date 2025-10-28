@@ -67,4 +67,25 @@ mod tests {
         println!("{}", rv32i_core.registers);
     }
 
+    #[test]
+    fn test_jump() {
+        let mut rv32i_core = super::init_core(None);
+        rv32i_core.enable_debug(true);
+        super::load_elf(&mut rv32i_core, "./isa_tests/jump_and_return.elf");
+        for _i in 0..15{
+            rv32i_core.run();
+        }
+        println!("{}", rv32i_core.registers);
+    }
+
+    #[test]
+    fn test_memory() {
+        let mut rv32i_core = super::init_core(None);
+        rv32i_core.enable_debug(true);
+        super::load_elf(&mut rv32i_core, "./isa_tests/memory.elf");
+        for _i in 0..48{
+            rv32i_core.run();
+        }
+        rv32i_core.dcache.unwrap().read().unwrap().debug(0x8001_0000, 0x8001_0010).unwrap();
+    }
 }

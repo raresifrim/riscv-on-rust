@@ -28,6 +28,7 @@ pub fn rv32_mcu_commit_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
             data_size,
             data: None,
         };
+        
         let response = rv32_core.dcache_request(request);
         let data = response.data;
 
@@ -52,7 +53,7 @@ pub fn rv32_mcu_commit_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
             0x1 => (WordSize::HALF, rs2 & 0xFFFF),
             _ => (WordSize::WORD, rs2),
         };
-
+        
         //get instruction from the current address
         let request = MemoryRequest {
             request_type: MemoryRequestType::WRITE,

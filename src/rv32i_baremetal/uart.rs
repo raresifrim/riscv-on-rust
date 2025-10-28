@@ -24,7 +24,7 @@ impl MemoryDevice for UART {
         if request.request_type == MemoryRequestType::WRITE {
             assert!(request.data_address == self.start_address + 0x4 && request.data.is_some());
             for char in request.data.unwrap() {
-                print!("{char}");
+                print!("{}", char as char);
             }
             MemoryResponse{
                 data: vec![],
@@ -55,7 +55,7 @@ impl MemoryDevice for UART {
         unimplemented!()
     }
 
-    fn debug(&self) -> std::fmt::Result {
+    fn debug(&self, _start_address: Address, _end_address: Address) -> std::fmt::Result {
         unimplemented!()        
     }
 }

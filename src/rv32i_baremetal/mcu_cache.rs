@@ -1,3 +1,5 @@
+use std::mem;
+
 use crate::risc_soc::memory_management_unit::{MemoryResponseType};
 use crate::risc_soc::{
     memory_management_unit::{
@@ -71,9 +73,12 @@ impl MemoryDevice for MCUCache {
             self.read_request(request)
         } else {
             let data = match request.data {
-                Some(d) => {
+                Some(mut d) => {
                     if d.len() == 0 || d.len() < request.data_size as usize {
                         panic!("Trying to store less data then requested in cache memory!");
+                    }
+                    if (request.data_size as usize) < d.len() {
+                        d.truncate(request.data_size as usize);
                     }
                     d
                 }
@@ -113,9 +118,24 @@ impl MemoryDevice for MCUCache {
         }
     }
 
-    fn debug(&self) -> std::fmt::Result {
-        println!("Memory {:?} =>", self.memory_type);
-        println!("{:X?}", self);
+    fn debug(&self, start_address: Address, end_address: Address) -> std::fmt::Result {
+        assert!(start_address >= self.start_address && end_address <= self.end_address);
+        println!("Memory {:?}: {{", self.memory_type);
+        let num_words = end_address - start_address;
+        let num_lines = num_words / self.line_size as u64;
+        for i in 0..=num_lines {
+            let current_line = start_address + i * self.line_size as u64; 
+            print!("{:X}: ", current_line);
+            for w in 0..self.line_size {
+                if w % 4 == 0 {
+                    print!(" ");
+                }
+                let current_line = (current_line - self.start_address) as usize;
+                print!("{:X}", self.data[current_line][w]);
+            }
+            print!("\n")
+        }
+        println!("}}");
         Ok(())
     }
 }
@@ -153,7 +173,6 @@ impl Cache for MCUCache {
 
     fn load_data(&self, address: Address) -> CacheResponse {
         let mut response = self.translate_address(address);
-
         if response.status == MemoryResponseType::CacheHit {
             // as in a real processor, data is copied from memory to a register
             // so we should not return a reference, but actually copy the data and pass it to the processor
@@ -172,11 +191,9 @@ impl Cache for MCUCache {
     /// its the job of the processor to give as an exact array, but if it passes a larger array, we use the provided size to store the needed amount
     fn store_data(&mut self, address: Address, data: Vec<u8>) -> CacheResponse {
         let mut response = self.translate_address(address);
-
         if response.status == MemoryResponseType::CacheHit {
             let byte_index = address % self.line_size as u64;
-
-            if (address + (data.len() as Address) - 1)
+            if (address - self.start_address + (data.len() as Address) - 1)
                 >= (response.index + self.line_size as Address)
             {
                 response.index = 0;
@@ -205,7 +222,7 @@ impl Cache for MCUCache {
             };
         }
         let address = address - self.start_address;
-        let row_index = address / self.num_lines as u64;
+        let row_index = address / self.line_size as u64;
         CacheResponse {
             cache_line: vec![],
             index: row_index,

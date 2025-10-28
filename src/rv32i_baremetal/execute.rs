@@ -144,10 +144,10 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
             }
         }
         OP_LUI => {
-            alu_out = imm << 12;
+            alu_out = imm;
         }
         OP_AUIPC => {
-            alu_out = (pc as i32 + (imm << 12) as i32) as RiscWord;
+            alu_out = (pc as i32 + imm as i32) as RiscWord;
         }
         _ => {}
     }

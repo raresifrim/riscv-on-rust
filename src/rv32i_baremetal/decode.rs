@@ -1,5 +1,5 @@
 use crate::risc_soc::pipeline_stage::PipelineData;
-use crate::risc_soc::risc_soc::RiscCore;
+use crate::risc_soc::risc_soc::{RiscCore, RiscWord};
 use crate::rv32i_baremetal::core::{EX_STAGE, WB_STAGE};
 use std::u32;
 
@@ -66,7 +66,7 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
             (instruction as i32 >> (OPCODE_L + FUNCT_3L + 2 * REG_L)) as u32 & u32::MAX
         }
         OP_STORE => {
-            ((instruction as i32 >> 20) << REG_L) as u32 | ((instruction >> OPCODE_L) & REG_MASK)
+            ((instruction as i32 >> 25) << 7) as u32 | ((instruction >> OPCODE_L) & REG_MASK)
         }
         OP_BRANCH => {
             let instr7 = (instruction >> 7 & 0x1) << 11;
@@ -82,7 +82,7 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
             let instr31 = ((instruction as i32 >> 31) as u32) << 20;
             instr31 | instr19_12 | instr20 | instr30_21
         }
-        OP_AUIPC | OP_LUI => instruction & 0xFFF,
+        OP_AUIPC | OP_LUI => instruction & 0xFFFF_F000,
         OP_ALU => 0u32,
         0x0 => 0u32,
         _ => panic!("Cannot decode this type of opcode: {opcode}"), //this MCU cannot execute SYSTEM/FENCE instr
