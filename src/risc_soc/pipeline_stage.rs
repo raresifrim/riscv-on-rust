@@ -1,6 +1,5 @@
 use crate::risc_soc::risc_soc::RiscCore;
 use crossbeam_channel::{Receiver, Sender};
-use std::{ops::{Deref, DerefMut}, sync::Barrier};
 
 
 #[derive(Debug, Clone)]
@@ -50,6 +49,14 @@ impl PipelineData {
         }
         value
     }
+
+    pub fn push_bytes(&mut self, mut data: Vec<u8>) {
+        self.0.append(&mut data);
+    }
+
+    pub fn size(&self) -> usize {
+        self.0.len()
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -63,16 +70,19 @@ pub struct PipelinePayload {
     pub data: PipelineData,
 }
 
+
 pub struct PipelineStage {
     /// name identifier and index for the pipeline stage
     pub name: String,
     pub index: usize,
-    pub size: usize,
+    pub size_in: usize,
+    pub size_out: usize,
     /// current clock_cycle and instruction in this stage
     pub instruction: Instruction,
     pub clock_cycle: ClockCycle,
-    /// current data it processes
-    pub data: PipelineData,
+    /// current data it consumed and produced during a clock cycle
+    pub data_in: PipelineData,
+    pub data_out: PipelineData,
     /// input and output to previous and next stages
     /// stages like fetch and commit may not have any previous or next stage
     /// so we define the input and output channels as optional
@@ -89,14 +99,15 @@ pub trait PipelineStageInterface {
     fn new(
         name: String,
         index: usize,
-        size: usize,
+        size_in: usize,
+        size_out: usize,
         process_fn: Self::F,
         input_channel: Option<Receiver<PipelinePayload>>,
         output_channel: Option<Sender<PipelinePayload>>,
     ) -> Self;
 
     /// extract data from current moment
-    fn extract_data(&self) -> &PipelineData;
+    fn extract_data(&self) -> (&PipelineData,&PipelineData);
 
     /// check the current instruction and clock cycle of this pipeline stage
     fn get_current_step(&self) -> (ClockCycle, Instruction);
@@ -110,7 +121,8 @@ impl PipelineStageInterface for PipelineStage {
     fn new(
         name: String,
         index: usize,
-        size: usize,
+        size_in: usize,
+        size_out: usize,
         process_fn: Self::F,
         input_channel: Option<Receiver<PipelinePayload>>,
         output_channel: Option<Sender<PipelinePayload>>,
@@ -118,40 +130,29 @@ impl PipelineStageInterface for PipelineStage {
         Self {
             name,
             index,
-            size,
+            size_in,
+            size_out,
             process_fn,
             debug: false,
             instruction: Instruction(0x0),
             clock_cycle: 0,
             input_channel,
             output_channel,
-            data: PipelineData(vec![0u8; size]),
+            data_in: PipelineData(vec![0u8; size_in]),
+            data_out: PipelineData(vec![0u8; size_out]),
         }
     }
 
-    fn extract_data(&self) -> &PipelineData {
-        &self.data
+    fn extract_data(&self) -> (&PipelineData,&PipelineData) {
+        (&self.data_in, &self.data_out)
     }
 
     fn get_current_step(&self) -> (ClockCycle, Instruction) {
         (self.clock_cycle, self.instruction)
     }
 
-
     fn enable_debug(&mut self, debug: bool) {
         self.debug = debug
     }
 }
 
-impl Deref for PipelineStage {
-    type Target = PipelineData;
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-impl DerefMut for PipelineStage {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
-    }
-}

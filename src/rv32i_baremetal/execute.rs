@@ -1,6 +1,6 @@
 use crate::risc_soc::risc_soc::RiscCore;
 use crate::risc_soc::{pipeline_stage::PipelineData, risc_soc::RiscWord};
-use crate::rv32i_baremetal::core::{EX_STAGE, WB_STAGE};
+use crate::rv32i_baremetal::core::{EX_STAGE, MEM_STAGE, WB_STAGE, ID_STAGE};
 use crate::rv32i_baremetal::decode::REG_MASK;
 use crate::rv32i_baremetal::decode::{
     OP_ALU, OP_ALUI, OP_AUIPC, OP_BRANCH, OP_JAL, OP_JALR, OP_LOAD, OP_LUI, OP_STORE,
@@ -24,21 +24,36 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
     let rs1_address = pipeline_reg.get_u8(0x17);
     let rs2_address = pipeline_reg.get_u8(0x18);
 
-    //Critical region where we wait for notify from WB
-    // wait for WB stage to get latest values for our registers
-    let wb_wire_data = &rv32_core.cdb[WB_STAGE];
-    let wb_data = wb_wire_data.read();
+    // send EX info to ID stage
+    let mut id_data = vec![];
+    id_data.push(mem_read_write);
+    id_data.push(rd_address);
+    let id_data = PipelineData(id_data);
+    rv32_core.cdb.assign(EX_STAGE, ID_STAGE, id_data);
 
-    if !wb_data.0.is_empty() {
-        let wb_reg_write = wb_data.get_u8(0x0);
-        let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
-        let wb_rd_value = wb_data.get_u32(0x2);
-        if wb_reg_write == 0x1 && wb_rd_address == rs1_address {
-            rs1 = wb_rd_value;
-        }
-        if wb_reg_write == 0x1 && wb_rd_address == rs2_address {
-            rs2 = wb_rd_value;
-        }
+    // check WB stage to get latest values for our registers
+    let wb_data = rv32_core.cdb.pull(WB_STAGE, EX_STAGE);
+    let wb_reg_write = wb_data.get_u8(0x0);
+    let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
+    let wb_rd_value = wb_data.get_u32(0x2);
+    if wb_reg_write == 0x1 && wb_rd_address == rs1_address {
+        rs1 = wb_rd_value;
+    }
+    if wb_reg_write == 0x1 && wb_rd_address == rs2_address {
+        rs2 = wb_rd_value;
+    }
+
+    // check MEM stage to get latest values for our registers
+    // MEM has higher priority on produced values, so we assign its values last
+    let mem_data = rv32_core.cdb.pull(MEM_STAGE, EX_STAGE);
+    let mem_reg_write = mem_data.get_u8(0x0);
+    let mem_rd_address = mem_data.get_u8(0x1) & REG_MASK as u8;
+    let mem_rd_value = mem_data.get_u32(0x2);
+    if mem_reg_write == 0x1 && mem_rd_address == rs1_address {
+        rs1 = mem_rd_value;
+    }
+    if mem_reg_write == 0x1 && mem_rd_address == rs2_address {
+        rs2 = mem_rd_value;
     }
 
     let mut take_jump: u8 = 0u8;
@@ -152,14 +167,6 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
         _ => {}
     }
 
-    //send info about branch to IF
-    let mut if_pipe = vec![];
-    if_pipe.push(branch_or_jump);
-    if_pipe.push(take_jump);
-    if_pipe.extend_from_slice(&pc.to_le_bytes());
-    let ex_data = PipelineData(if_pipe);
-    let ex_wire_data = &rv32_core.cdb[EX_STAGE];
-    ex_wire_data.assign(ex_data);
 
     let mut pipeline_out = vec![];
     pipeline_out.push(reg_write);
@@ -168,6 +175,9 @@ pub fn rv32_mcu_execute_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore)
     pipeline_out.push(func3);
     pipeline_out.extend_from_slice(&alu_out.to_le_bytes());
     pipeline_out.extend_from_slice(&rs2.to_le_bytes());
+    pipeline_out.push(branch_or_jump);
+    pipeline_out.push(take_jump);
+    pipeline_out.extend_from_slice(&pc.to_le_bytes());
 
     PipelineData(pipeline_out)
 }

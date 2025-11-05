@@ -1,7 +1,8 @@
 mod fetch;
 mod decode;
 mod execute;
-mod commit;
+mod writeback;
 mod mcu_cache;
 mod uart;
+mod memory;
 pub mod core;

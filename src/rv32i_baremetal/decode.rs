@@ -1,6 +1,6 @@
-use crate::risc_soc::pipeline_stage::PipelineData;
-use crate::risc_soc::risc_soc::{RiscCore, RiscWord};
-use crate::rv32i_baremetal::core::{EX_STAGE, WB_STAGE};
+use crate::risc_soc::pipeline_stage::{PipelineData};
+use crate::risc_soc::risc_soc::{RiscCore};
+use crate::rv32i_baremetal::core::{EX_STAGE, ID_STAGE, IF_STAGE, WB_STAGE, MEM_STAGE};
 use std::u32;
 
 /// FUNC7 and FUNCT3 field lengths
@@ -31,7 +31,6 @@ pub const OP_FENCE: u8 = 0b0001111; // Fence
 pub const OP_SYSTEM: u8 = 0b1110011; // System Instructions (ECALL, EBREAK, etc.)
 
 pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) -> PipelineData {
-    
     // we set the instruction starting at address 0x0 in the received pipeline data
     let instruction = pipeline_reg.get_u32(0x0);
     let pc = pipeline_reg.get_u32(0x4);
@@ -91,27 +90,36 @@ pub fn rv32_mcu_decode_stage(pipeline_reg: &PipelineData, rv32_core: &RiscCore) 
     //leave read of regs at the end
     //first check commit stage(4th in our case) and see if there is a register to commit first as it might be needed for one of the rs
     // wait for WB stage to get latest values for our registers
-    let wb_wire_data = &rv32_core.cdb[WB_STAGE];
-    let wb_data = wb_wire_data.read();
-    if !wb_data.0.is_empty() {
-        let wb_reg_write = wb_data.get_u8(0x0);
-        let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
-        let wb_rd_value = wb_data.get_u32(0x2);
-        if wb_reg_write == 0x1 {
-            rv32_core.write_reg(wb_rd_address as usize, wb_rd_value);
-        }
+    let wb_data = rv32_core.cdb.pull(WB_STAGE, ID_STAGE);
+    let wb_reg_write = wb_data.get_u8(0x0);
+    let wb_rd_address = wb_data.get_u8(0x1) & REG_MASK as u8;
+    let wb_rd_value = wb_data.get_u32(0x2);
+    if wb_reg_write == 0x1 {
+        rv32_core.write_reg(wb_rd_address as usize, wb_rd_value);
     }
     let (rs1, rs2) = rv32_core.read_regs(rs1_address as usize, rs2_address as usize);
 
     // wait for EX stage to see if there was a jump/branch and if we should flush the current instruction
-    let ex_wire_data = &rv32_core.cdb[EX_STAGE];
-    let ex_data = ex_wire_data.read();
-    if !ex_data.0.is_empty() {
-        let ex_branch_or_jump = ex_data.get_u8(0x0);
-        let ex_take_jump = ex_data.get_u8(0x1);
-        if ex_branch_or_jump & ex_take_jump == 0x1 {
-            return PipelineData(vec![]);
-        }
+    // or check if there is a lw stall that we should handle
+    let ex_data = rv32_core.cdb.pull(EX_STAGE, ID_STAGE);
+    let ex_mem_read = ex_data.get_u8(0x0);
+    let ex_rd = ex_data.get_u8(0x1);
+    let mem_data = rv32_core.cdb.pull(MEM_STAGE, ID_STAGE);
+    let mem_branch_or_jump = mem_data.get_u8(0x0);
+    let mem_take_jump = mem_data.get_u8(0x1);
+    if mem_branch_or_jump & mem_take_jump == 0x1 {
+        rv32_core.reset_stage(ID_STAGE, true);
+        rv32_core.reset_stage(EX_STAGE, true);
+    } else if ex_mem_read == 0x1
+        && ex_rd != 0x0
+        && (ex_rd == rs1_address
+            || ((opcode == OP_ALU || opcode == OP_STORE) && ex_rd == rs2_address)) {
+        rv32_core.enable_stage(IF_STAGE, false);
+        rv32_core.reset_stage(ID_STAGE, true);
+    } else {
+        rv32_core.enable_stage(IF_STAGE, true);
+        rv32_core.reset_stage(ID_STAGE, false);
+        rv32_core.reset_stage(EX_STAGE, false);
     }
 
     //concatanate add data into the pipeline register for next stage

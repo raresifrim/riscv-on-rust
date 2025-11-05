@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
+use std::hash::{BuildHasher, Hasher, RandomState};
 
 /// WireData should represent combinational logic data that is passed through "wire" structures such as in the case of the wire net type in Verilog
 /// In order to react to it we are using the CondVar sync mechanism in Rust
@@ -52,35 +53,39 @@ impl Wire {
 
         if self.critical_path.is_some() {
             let result = cvar
-                .wait_timeout(wire, Duration::from_nanos(self.critical_path.unwrap() as u64))
+                .wait_timeout_while(wire, Duration::from_nanos(self.critical_path.unwrap() as u64), |data|{
+                    data.is_none()
+                })
                 .unwrap();
-            if result.1.timed_out() && result.0.is_none() {
+            if result.1.timed_out() {
                 if self.debug {
-                    println!("Setup + Holdup times might have been violated!");
+                    println!("Setup + Holdup times might have been violated by some critical path!");
                 } else {
-                    tracing::warn!("Setup + Holdup times might have been violated!");
+                    tracing::warn!("Setup + Holdup times might have been violated by some critical path!");
                 }
-                PipelineData(vec![])
+                //return some undefined large enough data to mimic the behaviour of reading while updating in setup/holdup times
+                let bytes: Vec<u8> = (0..256)
+                .map(|_| (RandomState::new().build_hasher().finish() % 255) as u8)
+                .collect();
+                return PipelineData(bytes)
             } else {
                 if self.debug {
-                    println!("Combinational logic path was within the defined critical path");
+                    println!("Combinational logic delay was within the defined critical path");
                 } else {
-                    tracing::info!("Combinational logic path was within the defined critical path");
+                    tracing::info!("Combinational logic delay was within the defined critical path");
                 }
                 return result.0.as_ref().unwrap().clone()
             }
         } else {
-            if wire.is_none() {
-                let result = cvar.wait(wire).unwrap();
-                if result.is_some() {
-                    let data = result.as_ref().unwrap();
-                    return data.clone();
-                } else {
-                    return PipelineData(vec![])
-                }
-            } else {
-                return wire.as_ref().unwrap().clone();
-            }
+            let result = cvar.wait_while(wire, |data|{
+                data.is_none()
+            }).unwrap();
+            let data = result.as_ref().unwrap();
+            //should never get empty data as this models ideal behaviour
+            assert!(!data.is_empty());
+            return data.clone();
         }
     }
+
 }
+

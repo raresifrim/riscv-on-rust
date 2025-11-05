@@ -1,17 +1,17 @@
 use super::pipeline_stage::*;
 use crate::risc_soc::cache::Cache;
+use crate::risc_soc::cdb::CommonDataBus;
 use crate::risc_soc::memory_management_unit::{
     Address, MemoryDeviceType, MemoryManagementUnit, MemoryRequest,
     MemoryResponse, MemoryResponseType,
 };
-use crate::risc_soc::wire::Wire;
 use object::read::elf::{FileHeader, SectionHeader};
 use object::{Endianness, elf};
 use std::fmt::Debug;
 use std::fs;
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// type used to represent data inside the RiscCore (defaulted to u32 for RV32)
@@ -27,42 +27,50 @@ pub enum WordSize {
     DOUBLE = 8,
 }
 
+/// should usually represent main control signals such as a reset and enable
+type PipelineControlSignals = Vec<AtomicBool>;
+const RESET_SIGNAL:usize = 0x0;
+const ENABLE_SIGNAL: usize= 0x1;
+
 pub struct RiscCore {
     pub debug: bool,
     pub stages: Vec<Arc<Mutex<PipelineStage>>>,
-    pub pipeline_reg_width: Vec<usize>,
     pub icache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub dcache: Option<Arc<RwLock<Box<dyn Cache + Send + Sync>>>>,
     pub registers: Registers,
     pub program_counter: AtomicU64,
     pub mmu: Arc<RwLock<MemoryManagementUnit>>,
     pub clock_period: Option<u128>, //nanoseconds
-    pub cdb: Vec<Wire>
+    pub cdb: CommonDataBus,
+    pub pipeline_control_signals: Vec<PipelineControlSignals>
 }
 
 impl RiscCore {
     pub fn new(num_stages: usize, clock_period: Option<u128>, debug: bool) -> Self {
         // create an empty array of stages
         let stages = Vec::with_capacity(num_stages);
-        let cdb = Vec::with_capacity(num_stages);
+        let pipeline_control_signals = Vec::with_capacity(num_stages);
+        let cdb = CommonDataBus::new(num_stages, clock_period, debug);
         Self {
             stages,
             icache: None,
             dcache: None,
-            pipeline_reg_width: vec![0usize; num_stages],
             registers: Registers::default(),
             program_counter: AtomicU64::new(0x8000_0000),
             mmu: Arc::new(RwLock::new(MemoryManagementUnit::default())),
             cdb,
             clock_period,
-            debug
+            debug,
+            pipeline_control_signals
         }
     }
 
     pub fn enable_debug(&mut self, debug: bool){
         self.debug = debug;
-        for cdb_lane in &mut self.cdb {
-            cdb_lane.enable_debug(debug);
+        for cdb_lane in &mut self.cdb.bus {
+            for wire in cdb_lane.1 {
+                wire.enable_debug(debug);
+            }
         }
         for pipeline_stage in &self.stages{
             let mut lock = pipeline_stage.lock().unwrap();
@@ -130,11 +138,33 @@ impl RiscCore {
         if self.stages.len() + 1 > self.stages.capacity() {
             panic!("Trying to add more stages then configured for current core!");
         }
-        self.pipeline_reg_width[self.stages.len()] = stage.size;
         stage.enable_debug(self.debug);
         self.stages.push(Arc::new(Mutex::new(stage)));
-        self.cdb.push(Wire::new(self.clock_period, self.debug));
+        let mut control_signals = vec![];
+        control_signals.push(AtomicBool::new(false)); //reset
+        control_signals.push(AtomicBool::new(true)); //enable
+        self.pipeline_control_signals.push(control_signals);
         self
+    }
+
+    pub fn reset_stage(&self, stage_index: usize, reset_value: bool) {
+        let stage_control_signals = &self.pipeline_control_signals[stage_index];
+        stage_control_signals[RESET_SIGNAL].store(reset_value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn enable_stage(&self, stage_index: usize, enable_value: bool) {
+        let stage_control_signals = &self.pipeline_control_signals[stage_index];
+        stage_control_signals[ENABLE_SIGNAL].store(enable_value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_stage_reset(&self, stage_index: usize) -> bool {
+        let stage_control_signals = &self.pipeline_control_signals[stage_index];
+        stage_control_signals[RESET_SIGNAL].load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn is_stage_enabled(&self, stage_index: usize) -> bool {
+        let stage_control_signals = &self.pipeline_control_signals[stage_index];
+        stage_control_signals[ENABLE_SIGNAL].load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// load a binary file containing the code to be executed
@@ -175,7 +205,7 @@ impl RiscCore {
                 .data(endian, &*data)
                 .expect("Failed to read section data");
             let address = section.sh_addr.get(endian) as Address;
-            let size = section.sh_size.get(endian);
+            //let size = section.sh_size.get(endian);
             //println!("{name} @{:X}:{:X}", address, size);
             //println!("Data: {:?}", data);
 
@@ -225,49 +255,54 @@ impl RiscCore {
     }
 
     #[inline]
-    fn trace_asm_instr(&self, instr_bin: u32, stage: &PipelineStage, disassmble: bool) {
+    fn trace_asm_instr(&self, stage: &mut PipelineStage, print_asm: bool, disassmble: bool) {
         use crate::risc_soc::instruction_asm::rv32_asm;
-        if disassmble {
-            let asm_instr = rv32_asm(instr_bin);
-            if self.debug {
-                println!(
-                    "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
-                    stage.name,
-                    stage.clock_cycle,
-                    asm_instr,
-                    stage.instruction.0
-                );  
-            } else {
-                tracing::info!(
-                    "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
-                    stage.name,
-                    stage.clock_cycle,
-                    asm_instr,
-                    stage.instruction.0
-                );
+        if print_asm {
+            // handle the print/log of the current instruction
+            let mut instr_bin = stage.instruction.0;
+            if stage.index == 0x0 && !stage.data_out.is_empty() {
+                //special case for first stage in pipeline
+                instr_bin = stage.data_out.get_u32(0x0);
+                stage.instruction = Instruction(instr_bin);
             }
-        } else {
-            if self.debug {
-                println!(
-                    "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
-                    stage.name,
-                    stage.clock_cycle,
-                    stage.instruction.0
-                );  
+
+            if disassmble {
+                let asm_instr = rv32_asm(instr_bin);
+                if self.debug {
+                    println!(
+                        "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
+                        stage.name, stage.clock_cycle, asm_instr, stage.instruction.0
+                    );
+                } else {
+                    tracing::info!(
+                        "Pipeline Stage {} @ClockCycle {} -> Instruction:{}(0x{:X})",
+                        stage.name,
+                        stage.clock_cycle,
+                        asm_instr,
+                        stage.instruction.0
+                    );
+                }
             } else {
-                tracing::info!(
-                    "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
-                    stage.name,
-                    stage.clock_cycle,
-                    stage.instruction.0
-                );
+                if self.debug {
+                    println!(
+                        "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
+                        stage.name, stage.clock_cycle, stage.instruction.0
+                    );
+                } else {
+                    tracing::info!(
+                        "Pipeline Stage {} @ClockCycle {} -> Instruction: 0x{:X}",
+                        stage.name,
+                        stage.clock_cycle,
+                        stage.instruction.0
+                    );
+                }
             }
         }
     }
 
     /// start execution of loaded program
     /// if running in debug mode it will run a single instruction through all pipeline stages and the run function must be called for each new instruction
-    pub fn run(&mut self, clock_cycles: Option<u64>) {
+    pub fn run(&mut self, num_clock_cycles: Option<u64>) {
         //start execution of all stages
         use std::thread::sleep;
         use std::time::Instant;
@@ -282,7 +317,7 @@ impl RiscCore {
                     let mut stage = arc_stage.lock().unwrap();
                     loop {
                         
-                        self.cdb[stage.index].clear(); //clear wires before new clock edge so that we can react to a change
+                        self.cdb.clear(stage.index); //clear all wires of current stage before new clock edge so that we can react to a change
                         barrier.wait(); //clock boundary
                         let pipeline_payload;
                         
@@ -291,7 +326,7 @@ impl RiscCore {
                             match stage.input_channel.as_ref().unwrap().try_recv() {
                                 Ok(data_input) => {
                                     stage.instruction = data_input.instruction;
-                                    stage.data = data_input.data;
+                                    stage.data_in = data_input.data;
                                 },
 
                                 Err(e) => {
@@ -304,17 +339,36 @@ impl RiscCore {
                                     
                                 }
                             }
+                        } else {
+                            stage.instruction = Instruction(0x0);
+                            stage.data_in = PipelineData(vec![]); 
                         };
     
                         let period_start = Instant::now();
-
-                        let data_input = if stage.data.is_empty() { &PipelineData(vec![0u8; self.pipeline_reg_width[stage.index]]) } else { &stage.data };
-                        let mut data_output =  (stage.process_fn)(data_input, self);
-                                    
+                        let data_output = (stage.process_fn)(&stage.data_in, self);            
                         let elapsed_period = period_start.elapsed();
+                        
+                        barrier.wait(); //clock boundary
+                        
+                        //chech if a reset or a stall was asserted 
+                        let reset = self.is_stage_reset(stage.index);
+                        let enabled = self.is_stage_enabled(stage.index);
+                        if reset {
+                            // reset the output of the current pipeline stage
+                            stage.data_out = PipelineData(vec![0u8; stage.size_out]);
+                            stage.instruction = Instruction(0x0);
+                        } else if enabled {
+                            //update output of pipeline stage if no stall was asserted
+                            stage.data_out = data_output;
+                            if stage.index == 0x0 {
+                                self.set_pc(self.get_pc() + 4);
+                            }
+                        } 
+
+                        self.trace_asm_instr(&mut stage, true, true);
+
                         let period = elapsed_period.as_nanos();
                         tracing::info!("Stage {} delay time: {} ns", stage.name, period);
-
                         if clock_period.is_some() {
                             let clock_period = clock_period.unwrap();
                             if period < clock_period {
@@ -329,28 +383,13 @@ impl RiscCore {
                                 );
                             }
                         }
-                        
-                        let mut instr_bin = stage.instruction.0;
-                        if stage.input_channel.is_none() {
-                            instr_bin = data_output.get_u32(0x0);
-                            stage.instruction = Instruction(instr_bin);
-                        }
-                        else if stage.data.is_empty() {
-                            instr_bin = 0x0; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
-                            data_output = PipelineData(vec![]); //we should also send nothing further 
-                        }
-                        else if data_output.0.is_empty() {
-                            instr_bin = 0x0; //if the stage send nothing then we got a NOP(bubble) such in the case of a mispredicted branch
-                        }
-
-                        self.trace_asm_instr(instr_bin, &stage, true);
 
                         pipeline_payload = PipelinePayload {
                             instruction: stage.instruction,
-                            data: data_output,
+                            data: stage.data_out.clone(),
                         };
 
-                        if clock_cycles.is_some() && stage.clock_cycle == clock_cycles.unwrap() {
+                        if num_clock_cycles.is_some() && stage.clock_cycle == num_clock_cycles.unwrap() {
                             break;
                         }
                                 
@@ -366,9 +405,7 @@ impl RiscCore {
                             None => {}
                         }
                         
-                        barrier.wait(); //clock boundary
                         stage.clock_cycle += 1;
-                        
                         if self.debug {
                             break;
                         }
@@ -420,7 +457,7 @@ use std::fmt::Display;
 impl Display for Registers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for i in 0..self.0.len() {
-            write!(f, "x{i}={:?}\n", (self.0[i].load(std::sync::atomic::Ordering::SeqCst) as RiscWord).cast_signed())?;
+            write!(f, "x{i}={:X}\n", (self.0[i].load(std::sync::atomic::Ordering::SeqCst) as RiscWord).cast_signed())?;
         }
         Ok(())
     }    

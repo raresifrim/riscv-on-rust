@@ -1,5 +1,3 @@
-use std::mem;
-
 use crate::risc_soc::memory_management_unit::{MemoryResponseType};
 use crate::risc_soc::{
     memory_management_unit::{
